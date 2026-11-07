@@ -8,7 +8,12 @@ pub const syntax = struct {
     pub const Reason = @import("syntax/parse.zig").Reason;
     pub const Error = @import("syntax/parse.zig").Error;
 };
+/// ECMA-262's patterns apart from what spectra runs.
+pub const ecmascript = struct {
+    pub const validate = @import("syntax/ecma.zig").validate;
+};
 
 test {
     _ = syntax;
+    _ = ecmascript;
 }

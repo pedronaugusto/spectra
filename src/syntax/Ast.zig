@@ -12,6 +12,9 @@ children: []const Index,
 root: Index,
 /// How many capturing groups: group `n` is the `n`th opening parenthesis that captures, from 1.
 captures: u32,
+/// The strings of the ECMAScript dialect's `\q{...}` classes, each a slice of `code_points`.
+strings: []const Slice = &.{},
+code_points: []const u21 = &.{},
 
 pub const Index = enum(u32) { _ };
 
@@ -29,7 +32,9 @@ pub const Node = struct {
 pub const Kind = union(enum) {
     /// Matches the empty string: an empty pattern, an empty alternative or group.
     empty,
-    /// One code point (or, with `Syntax.utf8 = false`, one byte, written `\xFF`).
+    /// One code point (or, with `Syntax.utf8 = false`, one byte, written `\xFF`). In the
+    /// ECMAScript dialect, a surrogate too: `\uD800`, and outside `u` and `v` each half of a
+    /// code point past U+FFFF, which ECMA-262 reads as two UTF-16 code units.
     literal: u21,
     /// `.`
     dot,
@@ -45,6 +50,22 @@ pub const Kind = union(enum) {
     /// Children are a slice of `children`.
     alternation: Slice,
     concat: Slice,
+    /// ECMAScript: `(?=...)`, `(?!...)`, `(?<=...)`, `(?<!...)`.
+    lookaround: Lookaround,
+    /// ECMAScript: `\1` or `\k<name>`.
+    backreference: Backreference,
+};
+
+pub const Lookaround = struct {
+    direction: enum { ahead, behind },
+    negated: bool,
+    sub: Index,
+};
+
+pub const Backreference = union(enum) {
+    number: u32,
+    /// The group's name, its escapes resolved.
+    name: []const u8,
 };
 
 pub const Slice = struct { start: u32, len: u32 };
@@ -107,6 +128,8 @@ pub const ClassItem = union(enum) {
     nested: Bracketed,
     /// `lhs && rhs`, `lhs -- rhs`, `lhs ~~ rhs`: each side the union of its items.
     operation: Operation,
+    /// ECMAScript's `\q{abc|d|}`: its strings, a slice of `strings`.
+    strings: Slice,
 };
 
 pub const Ascii = struct {
@@ -132,7 +155,8 @@ pub const Repetition = struct {
 
 pub const Group = struct {
     kind: union(enum) {
-        /// Its number (from 1) and its name, borrowed from the pattern.
+        /// Its number (from 1) and its name, borrowed from the pattern (in the ECMAScript
+        /// dialect, its escapes resolved).
         capture: struct { index: u32, name: ?[]const u8 },
         /// `(?:...)` or `(?flags:...)`: the flags it sets inside.
         non_capturing: Flags,
@@ -158,7 +182,7 @@ pub const Flags = struct {
 };
 
 pub fn node(ast: *const Ast, index: Index) Node {
-    return ast.nodes[@intFromEnum(index)];
+    return ast.nodes[@backingInt(index)];
 }
 
 pub fn childrenOf(ast: *const Ast, slice: Slice) []const Index {
@@ -167,4 +191,13 @@ pub fn childrenOf(ast: *const Ast, slice: Slice) []const Index {
 
 pub fn itemsOf(ast: *const Ast, slice: ItemSlice) []const ClassItem {
     return ast.class_items[slice.start..][0..slice.len];
+}
+
+/// A `\q{...}`'s strings, each a slice of `code_points`.
+pub fn stringsOf(ast: *const Ast, slice: Slice) []const Slice {
+    return ast.strings[slice.start..][0..slice.len];
+}
+
+pub fn codePointsOf(ast: *const Ast, slice: Slice) []const u21 {
+    return ast.code_points[slice.start..][0..slice.len];
 }

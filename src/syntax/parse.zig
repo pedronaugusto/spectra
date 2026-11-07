@@ -1,4 +1,5 @@
-//! The Rust dialect's parser (regex-syntax's grammar): a pattern into an `Ast`. Groups are
+//! A pattern into an `Ast`, by its dialect: here the Rust dialect's grammar (regex-syntax's),
+//! and `ecma.zig` the ECMAScript dialect's. Groups are
 //! parsed with an explicit stack, bounded by `Limits.nesting`, and so are classes inside
 //! classes; nothing recurses on the pattern's shape.
 const std = @import("std");
@@ -7,46 +8,15 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Syntax = @import("../Syntax.zig");
 const Limits = @import("../Limits.zig");
+const ecma = @import("ecma.zig");
+const diagnostic_zig = @import("diagnostic.zig");
 
-pub const Error = error{ OutOfMemory, Invalid, TooLarge };
+pub const Error = diagnostic_zig.Error;
+pub const Diagnostic = diagnostic_zig.Diagnostic;
+pub const Reason = diagnostic_zig.Reason;
 
-/// Why a pattern was refused, and where.
-pub const Diagnostic = struct {
-    span: Ast.Span = .{ .start = 0, .end = 0 },
-    reason: Reason = .none,
-};
-
-pub const Reason = enum {
-    none,
-    pattern_too_long,
-    nesting_too_deep,
-    invalid_utf8,
-    unclosed_group,
-    unopened_group,
-    unclosed_class,
-    empty_class,
-    class_range_out_of_order,
-    class_range_bad_end,
-    repetition_missing,
-    repetition_count_invalid,
-    repetition_count_too_large,
-    repetition_count_out_of_order,
-    escape_unexpected_end,
-    escape_unrecognized,
-    escape_hex_invalid,
-    code_point_invalid,
-    assertion_in_class,
-    unicode_class_invalid,
-    flag_unrecognized,
-    flag_repeated,
-    flag_dangling_negation,
-    flags_empty,
-    group_name_invalid,
-    group_name_duplicate,
-    ascii_class_invalid,
-};
-
-/// Parses `pattern`, its nodes in `arena`, which the `Ast` borrows, and the pattern too.
+/// Parses `pattern` as `syntax.dialect` writes it, its nodes in `arena`, which the `Ast`
+/// borrows, and the pattern too.
 pub fn parse(arena: Allocator, pattern: aegis.input.Untrusted([]const u8), syntax: Syntax, limits: Limits, diagnostic: ?*Diagnostic) Error!Ast {
     return pattern.parse(Context{ .arena = arena, .syntax = syntax, .limits = limits, .diagnostic = diagnostic }, parseTrusted);
 }
@@ -63,8 +33,21 @@ fn parseTrusted(c: Context, pattern: []const u8) Error!Ast {
         if (c.diagnostic) |d| d.* = .{ .span = .{ .start = 0, .end = 0 }, .reason = .pattern_too_long };
         return error.TooLarge;
     }
+    switch (c.syntax.dialect) {
+        .ecmascript => {
+            if (c.syntax.ignore_whitespace or c.syntax.swap_greed) return notInDialect(c);
+            const mode: ecma.Mode = if (c.syntax.unicode_sets) .unicode_sets else if (c.syntax.unicode) .unicode else .annex_b;
+            return ecma.read(c.arena, pattern, mode, c.limits, c.diagnostic);
+        },
+        .rust => if (c.syntax.unicode_sets) return notInDialect(c),
+    }
     var p: Parser = .{ .arena = c.arena, .pattern = pattern, .limits = c.limits, .diagnostic = c.diagnostic };
     return p.run(c.syntax.ignore_whitespace);
+}
+
+fn notInDialect(c: Context) error{Invalid} {
+    if (c.diagnostic) |d| d.* = .{ .span = .{ .start = 0, .end = 0 }, .reason = .syntax_not_in_dialect };
+    return error.Invalid;
 }
 
 const Frame = struct {
@@ -147,7 +130,7 @@ const Parser = struct {
     }
 
     fn add(p: *Parser, start: u32, kind: Ast.Kind) Error!Ast.Index {
-        const index: Ast.Index = @enumFromInt(p.nodes.items.len);
+        const index: Ast.Index = @fromBackingInt(@intCast(p.nodes.items.len));
         try p.nodes.append(p.arena, .{ .span = .{ .start = start, .end = p.at }, .kind = kind });
         return index;
     }
@@ -365,7 +348,7 @@ const Parser = struct {
             greedy = false;
         }
         const target = frame.items.pop() orelse return p.fail(start, p.at, .repetition_missing);
-        const target_node = p.nodes.items[@intFromEnum(target)];
+        const target_node = p.nodes.items[@backingInt(target)];
         if (target_node.kind == .flags) return p.fail(start, p.at, .repetition_missing);
         try frame.items.append(p.arena, try p.add(target_node.span.start, .{ .repetition = .{ .min = min, .max = max, .greedy = greedy, .sub = target } }));
     }

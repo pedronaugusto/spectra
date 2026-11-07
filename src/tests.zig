@@ -2,4 +2,5 @@
 test {
     _ = @import("spectra.zig");
     _ = @import("syntax/parse_test.zig");
+    _ = @import("syntax/ecma_test.zig");
 }

@@ -56,6 +56,8 @@ fn write(ast: *const Ast, index: Ast.Index, w: *std.Io.Writer) !void {
             for (ast.childrenOf(s)) |child| try write(ast, child, w);
             try w.writeAll("]");
         },
+        // The ECMAScript dialect's alone: ecma_test.zig writes them.
+        .lookaround, .backreference => return error.NotRustSyntax,
     }
 }
 
@@ -80,6 +82,7 @@ fn writeItems(ast: *const Ast, items: []const Ast.ClassItem, w: *std.Io.Writer) 
             try writeItems(ast, ast.itemsOf(o.rhs), w);
             try w.writeAll(")");
         },
+        .strings => return error.NotRustSyntax,
     };
 }
 

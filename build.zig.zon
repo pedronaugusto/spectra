@@ -10,8 +10,8 @@
             .hash = "aegis-0.2.4-rsxouvwTDACNY2hXYVwyUefGiHkfV4nV6HBftNXJRliQ",
         },
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#09423770d2a4ca25d91a03bf7b6dcd9b20ee8594",
-            .hash = "xenoglyph-0.5.1-YKXZlQ-PTgAXMmAuCfLKysfw6DBzqT1AYguNTgiiw1mV",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#d7713e04aa7a133715c4213c21cf34ea41270839",
+            .hash = "xenoglyph-0.5.1-YKXZlfsWUQDglONIB35mLmBc5HEwnAxuWz2VMpvw7sRI",
         },
     },
     .dev_dependencies = .{

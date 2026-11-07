@@ -13,6 +13,9 @@ dot_matches_new_line: bool = false,
 swap_greed: bool = false,
 /// Whitespace and `#` comments in the pattern are ignored.
 ignore_whitespace: bool = false,
+/// ECMAScript's `v`: class set expressions (`&&`, `--`, nested classes, `\q{...}`) and
+/// properties of strings. The ECMAScript dialect only; it reads as `v` whatever `unicode` is.
+unicode_sets: bool = false,
 /// The haystack is UTF-8 and a match never splits a code point; false: any bytes, `.` takes one.
 utf8: bool = true,
 
