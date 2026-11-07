@@ -1,0 +1,27 @@
+.{
+    .name = .spectra,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0x47cb32ef08c6a0b7,
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
+    .dependencies = .{
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis#c8982a86cbd8a85ac9941df59b6c36a10a252355",
+            .hash = "aegis-0.2.4-rsxouvwTDACNY2hXYVwyUefGiHkfV4nV6HBftNXJRliQ",
+        },
+        .xenoglyph = .{
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#09423770d2a4ca25d91a03bf7b6dcd9b20ee8594",
+            .hash = "xenoglyph-0.5.1-YKXZlQ-PTgAXMmAuCfLKysfw6DBzqT1AYguNTgiiw1mV",
+        },
+    },
+    .dev_dependencies = .{
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown#acd95d337b222e0223e60b923b5abae8d33bfaf2",
+            .hash = "shakedown-0.6.0-BR8U435LGADOWAz8MqgysJwuG83P_RkOlBLEo8e130Sm",
+        },
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.18.6#fc92e4525de9c2097b7671c58d1b7dceeb382c7c",
+            .hash = "preflight-0.18.6-LX1Zwk0oFADjhxvFxsjPZipvvjxVgVuq3Z9jfPwQvaqw",
+        },
+    },
+}

@@ -1,0 +1,21 @@
+{
+  "sources": [
+    "src"
+  ],
+  "test_roots": [
+    "src/tests.zig"
+  ],
+  "test_support": [
+    "src/testing/**",
+    "src/**/*_test.zig"
+  ],
+  "test_dependencies": [
+    "shakedown"
+  ],
+  "function_exceptions": {},
+  "layout_exceptions": {},
+  "glint_paths": [
+    "src",
+    "build.zig"
+  ]
+}
