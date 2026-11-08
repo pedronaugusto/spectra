@@ -17,3 +17,8 @@ follow [Semantic Versioning](https://semver.org/).
   the `Ast` (`lookaround`, `backreference`), to be refused at translation where spectra cannot run them.
 - `ecmascript.validate(gpa, pattern, flags, limits, diagnostic)`: whether a pattern is valid ECMA-262 whatever spectra
   runs; `\p{...}` held to ECMA-262's tables exactly, by xenoglyph's names.
+- The HIR's range sets (`hir/ranges.zig`), of code points and of bytes: sorted ranges kept apart, union,
+  intersection, difference, symmetric difference and negation in time linear in the ranges, and closing under case
+  three ways: simple case folding (Rust's regex, ECMA-262 under `u` and `v`), ASCII's letters, and ECMA-262's
+  Canonicalize without `u` or `v` (full uppercase to one code unit, never from past U+007F into ASCII), orbit by orbit
+  through xenoglyph's `case.nextFolding`.
