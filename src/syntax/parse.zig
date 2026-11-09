@@ -35,7 +35,7 @@ fn parseTrusted(c: Context, pattern: []const u8) Error!Ast {
     }
     switch (c.syntax.dialect) {
         .ecmascript => {
-            if (c.syntax.ignore_whitespace or c.syntax.swap_greed) return notInDialect(c);
+            if (c.syntax.ignore_whitespace or c.syntax.swap_greed or !c.syntax.utf8) return notInDialect(c);
             const mode: ecma.Mode = if (c.syntax.unicode_sets) .unicode_sets else if (c.syntax.unicode) .unicode else .annex_b;
             return ecma.read(c.arena, pattern, mode, c.limits, c.diagnostic);
         },
@@ -380,7 +380,12 @@ const Parser = struct {
             'n' => .{ .literal = '\n' },
             'r' => .{ .literal = '\r' },
             'v' => .{ .literal = 0x0b },
-            'x' => .{ .literal = try p.hex(start, 2) },
+            'x' => blk: {
+                const braced = p.peek() == '{';
+                const value = try p.hex(start, 2);
+                if (!braced and value >= 0x80) break :blk .{ .byte = @intCast(value) };
+                break :blk .{ .literal = value };
+            },
             'u' => .{ .literal = try p.hex(start, 4) },
             'U' => .{ .literal = try p.hex(start, 8) },
             'd', 'D' => .{ .perl = .{ .class = .digit, .negated = c == 'D' } },
@@ -533,17 +538,29 @@ const Parser = struct {
             }
             const first = try p.classAtom();
             // `a-z`, unless the `-` ends the class or begins an operator.
-            if (first == .literal and p.peek() == '-' and p.peekAt(1) != ']' and p.peekAt(1) != '-' and p.peekAt(1) != null) {
+            if (rangeEnd(first) != null and p.peek() == '-' and p.peekAt(1) != ']' and p.peekAt(1) != '-' and p.peekAt(1) != null) {
                 p.at += 1;
                 const end_at = p.at;
                 const last = try p.classAtom();
-                if (last != .literal) return p.fail(end_at, p.at, .class_range_bad_end);
-                if (last.literal < first.literal) return p.fail(at, p.at, .class_range_out_of_order);
-                try level.items.append(p.arena, .{ .range = .{ first.literal, last.literal } });
+                const high = rangeEnd(last) orelse return p.fail(end_at, p.at, .class_range_bad_end);
+                const low = rangeEnd(first).?;
+                if (high < low) return p.fail(at, p.at, .class_range_out_of_order);
+                if (first == .byte or last == .byte) {
+                    try level.items.append(p.arena, .{ .hex_range = .{ .ends = .{ low, high }, .hex = .{ first == .byte, last == .byte } } });
+                } else try level.items.append(p.arena, .{ .range = .{ low, high } });
                 continue;
             }
             try level.items.append(p.arena, first);
         }
+    }
+
+    /// A class item as the end of a range, if it can be one.
+    fn rangeEnd(item: Ast.ClassItem) ?u21 {
+        return switch (item) {
+            .literal => |cp| cp,
+            .byte => |b| b,
+            else => null,
+        };
     }
 
     fn openLevel(p: *Parser, levels: *std.ArrayList(Level)) Error!void {
@@ -600,6 +617,7 @@ const Parser = struct {
         if (p.peek() == '\\') {
             return switch (try p.escape(true)) {
                 .literal => |cp| .{ .literal = cp },
+                .byte => |b| .{ .byte = b },
                 .perl => |perl| .{ .perl = perl },
                 .unicode => |unicode| .{ .unicode = unicode },
                 else => aegis.assert.never("in a class, escape gives a literal or a class"),

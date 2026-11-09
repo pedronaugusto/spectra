@@ -24,6 +24,7 @@ fn write(ast: *const Ast, index: Ast.Index, w: *std.Io.Writer) !void {
     switch (ast.node(index).kind) {
         .empty => try w.writeAll("()"),
         .literal => |cp| try w.print("'{u}'", .{cp}),
+        .byte => |b| try w.print("x{x}", .{b}),
         .dot => try w.writeAll("."),
         .assertion => |a| try w.print("@{t}", .{a}),
         .perl => |p| try w.print("\\{s}{t}", .{ if (p.negated) "!" else "", p.class }),
@@ -70,7 +71,9 @@ fn writeClass(ast: *const Ast, b: Ast.Bracketed, w: *std.Io.Writer) !void {
 fn writeItems(ast: *const Ast, items: []const Ast.ClassItem, w: *std.Io.Writer) anyerror!void {
     for (items) |item| switch (item) {
         .literal => |cp| try w.print("{u}", .{cp}),
+        .byte => |b| try w.print("x{x}", .{b}),
         .range => |r| try w.print("{u}-{u}", .{ r[0], r[1] }),
+        .hex_range => |r| try w.print("{x}-{x}", .{ r.ends[0], r.ends[1] }),
         .perl => |p| try w.print("\\{s}{t}", .{ if (p.negated) "!" else "", p.class }),
         .unicode => |u| try w.print("\\p{{{s}}}", .{u.name}),
         .ascii => |a| try w.print("[:{s}{t}:]", .{ if (a.negated) "^" else "", a.class }),

@@ -22,3 +22,8 @@ follow [Semantic Versioning](https://semver.org/).
   three ways: simple case folding (Rust's regex, ECMA-262 under `u` and `v`), ASCII's letters, and ECMA-262's
   Canonicalize without `u` or `v` (full uppercase to one code unit, never from past U+007F into ASCII), orbit by orbit
   through xenoglyph's `case.nextFolding`.
+- The HIR and the translation of both dialects into it (`hir/Hir.zig`, `hir/translate.zig`): flags applied, classes as
+  sets, Unicode names resolved (Rust's loosely, in regex-syntax's order; ECMA-262's exactly), each dialect's own `.`, `\d`,
+  `\s`, `\w`, `\b` and case rules. Refused by name as `Unsupported`: backreferences, lookbehind, a lookaround in a
+  lookaround, `v`'s properties of strings, and without `u` or `v` half of a code point past U+FFFF named alone; `.` and a
+  negated class there take one code point, where a UTF-16 engine takes half of one. Walked on explicit stacks.

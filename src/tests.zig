@@ -4,4 +4,5 @@ test {
     _ = @import("syntax/parse_test.zig");
     _ = @import("syntax/ecma_test.zig");
     _ = @import("hir/ranges_test.zig");
+    _ = @import("hir/translate_test.zig");
 }

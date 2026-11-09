@@ -58,6 +58,19 @@ pub const Reason = enum {
     class_strings_negated,
     /// ECMAScript: `\p{...}` naming no property or value of ECMA-262's tables.
     unicode_property_unknown,
+    /// Rust without `u`: a Unicode class, or a non-ASCII character in a class of bytes.
+    unicode_not_allowed,
+    /// Rust without `u`, matching UTF-8: what could match a byte past ASCII alone.
+    invalid_utf8_class,
+    /// ECMAScript constructs spectra refuses to run, by name.
+    unsupported_backreference,
+    unsupported_lookbehind,
+    unsupported_nested_lookaround,
+    /// A property with no data here: Age and the break properties, and `v`'s properties of strings.
+    unsupported_unicode_property,
+    /// ECMAScript without `u` or `v`: half of a code point past U+FFFF named alone. A UTF-16
+    /// engine matches half a character; a UTF-8 haystack has no halves.
+    unsupported_code_unit_split,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.
     regexp_flag_invalid,
 };

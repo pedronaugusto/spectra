@@ -36,6 +36,9 @@ pub const Kind = union(enum) {
     /// ECMAScript dialect, a surrogate too: `\uD800`, and outside `u` and `v` each half of a
     /// code point past U+FFFF, which ECMA-262 reads as two UTF-16 code units.
     literal: u21,
+    /// Rust's `\xNN` past `\x7F`: the code point under `u`, the byte without it, as a typed
+    /// `é` is the code point either way.
+    byte: u8,
     /// `.`
     dot,
     assertion: Assertion,
@@ -118,8 +121,12 @@ pub const ItemSlice = struct { start: u32, len: u32 };
 
 pub const ClassItem = union(enum) {
     literal: u21,
+    /// Rust's `\xNN` past `\x7F` (`Kind.byte`).
+    byte: u8,
     /// `a-z`, its ends inclusive and in order.
     range: [2]u21,
+    /// A range with at least one end a `byte`: `hex` says which.
+    hex_range: HexRange,
     perl: Perl,
     unicode: Unicode,
     /// `[:alpha:]` and its negation `[:^alpha:]`.
@@ -130,6 +137,11 @@ pub const ClassItem = union(enum) {
     operation: Operation,
     /// ECMAScript's `\q{abc|d|}`: its strings, a slice of `strings`.
     strings: Slice,
+};
+
+pub const HexRange = struct {
+    ends: [2]u21,
+    hex: [2]bool,
 };
 
 pub const Ascii = struct {

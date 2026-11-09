@@ -85,7 +85,7 @@ pub fn Set(comptime T: type, comptime max: T) type {
 
         /// Adds `range`, then puts the set back in order.
         pub fn add(s: *Self, gpa: Allocator, range: Range) Allocator.Error!void {
-            aegis.assert.invariant(range[0] <= range[1]);
+            aegis.assert.invariant(range[0] <= range[1], "a range runs first to last");
             try s.ranges.append(gpa, range);
             s.canonicalize();
         }

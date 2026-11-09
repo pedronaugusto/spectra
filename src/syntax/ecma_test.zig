@@ -375,6 +375,7 @@ fn write(ast: *const Ast, index: Ast.Index, w: *std.Io.Writer) !void {
     switch (ast.node(index).kind) {
         .empty => try w.writeAll("()"),
         .literal => |cp| try w.print("{x}", .{cp}),
+        .byte => return error.NotEcmaScript,
         .dot => try w.writeAll("."),
         .assertion => |a| try w.print("@{t}", .{a}),
         .perl => |p| try w.print("\\{s}{t}", .{ if (p.negated) "!" else "", p.class }),
@@ -433,6 +434,7 @@ fn writeItems(ast: *const Ast, items: []const Ast.ClassItem, w: *std.Io.Writer) 
         if (i != 0) try w.writeAll(" ");
         switch (item) {
             .literal => |cp| try w.print("{x}", .{cp}),
+            .byte, .hex_range => return error.WriteFailed,
             .range => |r| try w.print("{x}-{x}", .{ r[0], r[1] }),
             .perl => |p| try w.print("\\{s}{t}", .{ if (p.negated) "!" else "", p.class }),
             .unicode => |u| try w.print("\\p{{{s}{s}}}", .{ if (u.negated) "^" else "", u.name }),
