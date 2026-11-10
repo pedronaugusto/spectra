@@ -37,6 +37,9 @@ looks: LookSet,
 utf8: bool,
 /// Some match is empty: a search in UTF-8 checks where such a match ends.
 empty_ok: bool,
+/// Some state is a `loop_begin` or `loop_end`: each thread carries whether it read a byte since
+/// its innermost `loop_begin`, and is told apart by it.
+loop_checks: bool,
 
 pub const Transition = struct {
     lo: u8,
@@ -66,6 +69,14 @@ pub const State = union(enum) {
     /// Empties slots `first` to `end`, then `next`: ECMA-262's iteration, which starts with the
     /// captures of every group in its atom cleared.
     clear: struct { first: u32, end: u32, next: StateId },
+    /// ECMA-262's iteration that must not match empty begins, then `next`: the thread has read
+    /// nothing in it yet. Brackets each time past a repetition's minimum of an atom that can
+    /// match empty, with `loop_end`.
+    loop_begin: StateId,
+    /// That iteration ends, and goes on to `next` only if the thread read a byte since its
+    /// innermost `loop_begin`: an iteration past the minimum that matched empty fails
+    /// (RepeatMatcher's step 2.b). Quantifiers nest, so one bit a thread carries answers it.
+    loop_end: StateId,
     /// Matches nothing: an empty class.
     fail,
     match,

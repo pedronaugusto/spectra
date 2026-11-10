@@ -2,6 +2,9 @@
 //! alternatives in order, each (state, position) explored once, so the first match it reaches
 //! is the leftmost-first one, with its captures. Tests only: it allocates a bit per state and
 //! position. Every engine is checked against it on random patterns and haystacks.
+//!
+//! With ECMAScript's empty checks (`Nfa.loop_checks`) a path also carries whether it read a byte
+//! since its innermost `loop_begin`, and a (state, bit, position) is what is explored once.
 const std = @import("std");
 const Nfa = @import("../nfa/Nfa.zig");
 const look = @import("../nfa/look.zig");
@@ -9,7 +12,7 @@ const look = @import("../nfa/look.zig");
 pub const Span = struct { start: usize, end: usize };
 
 const Job = union(enum) {
-    explore: struct { id: Nfa.StateId, at: usize },
+    explore: struct { id: Nfa.StateId, at: usize, read: bool },
     restore: struct { slot: u32, value: ?usize },
 };
 
@@ -26,19 +29,22 @@ pub fn step(nfa: *const Nfa, s: Nfa.State, byte: u8) ?Nfa.StateId {
 
 fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span, start: usize, slots: []?usize) !?usize {
     const width = span.end - start + 1;
-    var visited = try std.DynamicBitSetUnmanaged.initEmpty(gpa, nfa.states.len * width);
+    const lanes: usize = if (nfa.loop_checks) 2 else 1;
+    var visited = try std.DynamicBitSetUnmanaged.initEmpty(gpa, nfa.states.len * lanes * width);
     defer visited.deinit(gpa);
     var jobs: std.ArrayList(Job) = .empty;
     defer jobs.deinit(gpa);
     @memset(slots, null);
-    try jobs.append(gpa, .{ .explore = .{ .id = nfa.start_anchored, .at = start } });
+    try jobs.append(gpa, .{ .explore = .{ .id = nfa.start_anchored, .at = start, .read = true } });
     while (jobs.pop()) |job| switch (job) {
         .restore => |back| slots[back.slot] = back.value,
         .explore => |e| {
             var id = e.id;
             var pos = e.at;
+            var read = e.read;
             while (true) {
-                const bit = id.raw() * width + (pos - start);
+                const lane: usize = if (nfa.loop_checks) @intFromBool(read) else 0;
+                const bit = (id.raw() * lanes + lane) * width + (pos - start);
                 if (visited.isSet(bit)) break;
                 visited.set(bit);
                 switch (nfa.state(id)) {
@@ -46,13 +52,14 @@ fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span,
                         if (pos == span.end) break;
                         id = step(nfa, nfa.state(id), haystack[pos]) orelse break;
                         pos += 1;
+                        read = true;
                     },
                     .look => |l| {
                         if (!look.holds(l.look, haystack, pos)) break;
                         id = l.next;
                     },
                     .binary => |b| {
-                        try jobs.append(gpa, .{ .explore = .{ .id = b.second, .at = pos } });
+                        try jobs.append(gpa, .{ .explore = .{ .id = b.second, .at = pos, .read = read } });
                         id = b.first;
                     },
                     .alternation => |slice| {
@@ -60,7 +67,7 @@ fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span,
                         var k = alts.len;
                         while (k > 1) {
                             k -= 1;
-                            try jobs.append(gpa, .{ .explore = .{ .id = alts[k], .at = pos } });
+                            try jobs.append(gpa, .{ .explore = .{ .id = alts[k], .at = pos, .read = read } });
                         }
                         id = alts[0];
                     },
@@ -79,6 +86,14 @@ fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span,
                             slots[slot] = null;
                         }
                         id = cl.next;
+                    },
+                    .loop_begin => |next| {
+                        read = false;
+                        id = next;
+                    },
+                    .loop_end => |next| {
+                        if (!read) break;
+                        id = next;
                     },
                     .fail => break,
                     .match => return pos,

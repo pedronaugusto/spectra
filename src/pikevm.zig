@@ -4,6 +4,11 @@
 //! per position, so a search visits at most (states × positions) states whatever the pattern:
 //! counted in every build and checked in safe ones.
 //!
+//! An automaton with ECMAScript's empty checks (`Nfa.loop_checks`) has threads that are a state
+//! and a bit, whether the thread read a byte since its innermost `loop_begin`: two threads at one
+//! state with different bits have different futures, so each pair is entered once per position
+//! (Barrière and Pit-Claudel's two copies of the automaton, PLDI 2024 §4.1), twice the states.
+//!
 //! A search allocates nothing: what it needs is the `Cache`, sized to the automaton once.
 const std = @import("std");
 const aegis = @import("aegis");
@@ -35,13 +40,16 @@ pub const Input = struct {
     }
 };
 
+/// A thread: a state, and with empty checks its bit, as one index (`state × lanes + bit`).
+const Key = u32;
+
 const SparseSet = struct {
-    dense: []Nfa.StateId,
+    dense: []Key,
     sparse: []u32,
     len: u32 = 0,
 
     fn init(gpa: Allocator, capacity: usize) Allocator.Error!SparseSet {
-        const dense = try gpa.alloc(Nfa.StateId, capacity);
+        const dense = try gpa.alloc(Key, capacity);
         errdefer gpa.free(dense);
         const sparse = try gpa.alloc(u32, capacity);
         @memset(sparse, 0);
@@ -53,31 +61,31 @@ const SparseSet = struct {
         gpa.free(s.sparse);
     }
 
-    /// Adds `id`, and whether it was not there.
-    fn insert(s: *SparseSet, id: Nfa.StateId) bool {
-        const i = s.sparse[id.raw()];
-        if (i < s.len and s.dense[i] == id) return false;
-        s.dense[s.len] = id;
-        s.sparse[id.raw()] = s.len;
+    /// Adds `key`, and whether it was not there.
+    fn insert(s: *SparseSet, key: Key) bool {
+        const i = s.sparse[key];
+        if (i < s.len and s.dense[i] == key) return false;
+        s.dense[s.len] = key;
+        s.sparse[key] = s.len;
         s.len += 1;
         return true;
     }
 
-    fn items(s: *const SparseSet) []const Nfa.StateId {
+    fn items(s: *const SparseSet) []const Key {
         return s.dense[0..s.len];
     }
 };
 
-/// The threads at one position: which states, and each one's slots.
+/// The threads at one position: which, and each one's slots.
 const Active = struct {
     set: SparseSet,
-    /// `stride` slots per state, and one row more of absent slots for a thread just started.
+    /// `stride` slots per thread, and one row more of absent slots for a thread just started.
     table: []?usize,
 
-    fn init(gpa: Allocator, states: usize, slots: usize) Allocator.Error!Active {
-        var set: SparseSet = try .init(gpa, states);
+    fn init(gpa: Allocator, threads: usize, slots: usize) Allocator.Error!Active {
+        var set: SparseSet = try .init(gpa, threads);
         errdefer set.deinit(gpa);
-        return .{ .set = set, .table = try gpa.alloc(?usize, (states + 1) * slots) };
+        return .{ .set = set, .table = try gpa.alloc(?usize, (threads + 1) * slots) };
     }
 
     fn deinit(a: *Active, gpa: Allocator) void {
@@ -85,8 +93,8 @@ const Active = struct {
         gpa.free(a.table);
     }
 
-    fn row(a: *Active, stride: usize, id: Nfa.StateId) []?usize {
-        return a.table[id.raw() * stride ..][0..stride];
+    fn row(a: *Active, stride: usize, key: Key) []?usize {
+        return a.table[key * stride ..][0..stride];
     }
 
     fn absent(a: *Active, stride: usize) []?usize {
@@ -98,15 +106,16 @@ const Active = struct {
 };
 
 const Follow = union(enum) {
-    explore: Nfa.StateId,
+    explore: struct { id: Nfa.StateId, read: bool },
     restore: struct { slot: u32, value: ?usize },
 };
 
 /// What a `Cache` holds for an automaton, counted: the one figure both the compiler's refusal
 /// (`Limits.cache`) and `Cache.init`'s allocations are made from.
 pub const Sizes = struct {
-    /// Entries of each thread set, and rows of its slot table but the absent row.
-    states: usize,
+    /// Entries of each thread set, and rows of its slot table but the absent row: the states,
+    /// twice over with empty checks.
+    threads: usize,
     /// Slots per thread.
     slots: usize,
     /// Entries of the closure's stack.
@@ -114,8 +123,8 @@ pub const Sizes = struct {
 
     /// The bytes they come to, or null past `usize`.
     pub fn bytes(s: Sizes) ?usize {
-        const set = mul(s.states, @sizeOf(Nfa.StateId) + @sizeOf(u32)) orelse return null;
-        const table = mul(mul(add(s.states, 1) orelse return null, s.slots) orelse return null, @sizeOf(?usize)) orelse return null;
+        const set = mul(s.threads, @sizeOf(Key) + @sizeOf(u32)) orelse return null;
+        const table = mul(mul(add(s.threads, 1) orelse return null, s.slots) orelse return null, @sizeOf(?usize)) orelse return null;
         const active = add(set, table) orelse return null;
         const both = mul(active, 2) orelse return null;
         const stack = mul(s.stack, @sizeOf(Follow)) orelse return null;
@@ -132,16 +141,30 @@ pub const Sizes = struct {
     }
 };
 
-/// What a `Cache` for `nfa` holds. Within one position each state is entered once, and pushes
+/// What a `Cache` for `nfa` holds. Within one position each thread is entered once, and pushes
 /// at most one restore or alternative per state, or its alternatives past the first; a clear
-/// pushes a restore per slot it empties.
+/// pushes a restore per slot it empties. With empty checks every state is two threads.
 pub fn sizes(nfa: *const Nfa) Sizes {
     var cleared: usize = 0;
     for (nfa.states) |s| switch (s) {
         .clear => |cl| cleared += cl.end - cl.first,
         else => {},
     };
-    return .{ .states = nfa.states.len, .slots = nfa.slots(), .stack = nfa.states.len + nfa.alternatives.len + cleared + 1 };
+    const n = lanes(nfa);
+    return .{ .threads = nfa.states.len * n, .slots = nfa.slots(), .stack = (nfa.states.len + nfa.alternatives.len + cleared) * n + 1 };
+}
+
+/// Threads per state: two with empty checks, a bit each, else one.
+fn lanes(nfa: *const Nfa) u32 {
+    return if (nfa.loop_checks) 2 else 1;
+}
+
+fn keyOf(nfa: *const Nfa, id: Nfa.StateId, read: bool) Key {
+    return if (nfa.loop_checks) id.raw() * 2 + @intFromBool(read) else id.raw();
+}
+
+fn stateOf(nfa: *const Nfa, key: Key) Nfa.StateId {
+    return @fromBackingInt(if (nfa.loop_checks) key / 2 else key);
 }
 
 /// What one automaton's searches need, made once: no search allocates.
@@ -159,14 +182,14 @@ pub const Cache = struct {
     /// Allocates what `sizes(nfa)` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, nfa: *const Nfa) Allocator.Error!Cache {
         const size = sizes(nfa);
-        var curr: Active = try .init(gpa, size.states, size.slots);
+        var curr: Active = try .init(gpa, size.threads, size.slots);
         errdefer curr.deinit(gpa);
-        var next: Active = try .init(gpa, size.states, size.slots);
+        var next: Active = try .init(gpa, size.threads, size.slots);
         errdefer next.deinit(gpa);
         const stack = try gpa.alloc(Follow, size.stack);
         errdefer gpa.free(stack);
         const slots = try gpa.alloc(?usize, size.slots);
-        return .{ .curr = curr, .next = next, .stack = stack, .slots = slots, .states = size.states };
+        return .{ .curr = curr, .next = next, .stack = stack, .slots = slots, .states = nfa.states.len };
     }
 
     pub fn deinit(c: *Cache, gpa: Allocator) void {
@@ -223,7 +246,7 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
         }
         // A thread started here comes after every thread started before: leftmost first.
         if (found == null and (!anchored or at == input.span.start)) {
-            closure(nfa, cache, curr, next.absent(stride), input.haystack, at, start);
+            closure(nfa, cache, curr, next.absent(stride), input.haystack, at, start, true);
         }
         if (nexts(nfa, cache, curr, next, input, at, slots)) found = at;
         if (input.earliest and found != null) break;
@@ -232,7 +255,7 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
     }
     if (std.debug.runtime_safety) {
         const positions = input.span.end - input.span.start + 1;
-        aegis.assert.invariant(cache.visited - visited_before <= 2 * nfa.states.len * positions, "a search enters each state at most once per position and step");
+        aegis.assert.invariant(cache.visited - visited_before <= 2 * nfa.states.len * lanes(nfa) * positions, "a search enters each thread at most once per position and step");
     }
     return found;
 }
@@ -241,8 +264,9 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
 /// match state wins, and every thread after it is dropped.
 fn nexts(nfa: *const Nfa, cache: *Cache, curr: *Active, next: *Active, input: Input, at: usize, slots: []?usize) bool {
     const stride = slots.len;
-    for (curr.set.items()) |id| {
+    for (curr.set.items()) |key| {
         cache.visited += 1;
+        const id = stateOf(nfa, key);
         const target: ?Nfa.StateId = switch (nfa.state(id)) {
             .byte_range => |t| if (at < input.span.end and t.contains(input.haystack[at])) t.next else null,
             .sparse => |slice| blk: {
@@ -255,34 +279,37 @@ fn nexts(nfa: *const Nfa, cache: *Cache, curr: *Active, next: *Active, input: In
                 break :blk null;
             },
             .match => {
-                @memcpy(slots, curr.row(stride, id));
+                @memcpy(slots, curr.row(stride, key));
                 return true;
             },
             else => null,
         };
-        if (target) |t| closure(nfa, cache, next, curr.row(stride, id), input.haystack, at + 1, t);
+        // A thread that read a byte has read one since its innermost `loop_begin`.
+        if (target) |t| closure(nfa, cache, next, curr.row(stride, key), input.haystack, at + 1, t, true);
     }
     return false;
 }
 
-/// Adds to `into` every state reachable from `from` by epsilon at `at`, in preference order,
-/// each with `slots` as the path to it wrote them. `slots` is put back as it was.
-fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, haystack: []const u8, at: usize, from: Nfa.StateId) void {
+/// Adds to `into` every thread reachable from `from` by epsilon at `at`, in preference order,
+/// each with `slots` as the path to it wrote them. `slots` is put back as it was. `read` is the
+/// thread's bit: whether it read a byte since its innermost `loop_begin`.
+fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, haystack: []const u8, at: usize, from: Nfa.StateId, from_read: bool) void {
     const stride = slots.len;
     var depth: usize = 0;
-    cache.stack[depth] = .{ .explore = from };
+    cache.stack[depth] = .{ .explore = .{ .id = from, .read = from_read } };
     depth += 1;
     while (depth > 0) {
         depth -= 1;
         switch (cache.stack[depth]) {
             .restore => |r| slots[r.slot] = r.value,
             .explore => |first| {
-                var id = first;
-                while (into.set.insert(id)) {
+                var id = first.id;
+                var read = first.read;
+                while (into.set.insert(keyOf(nfa, id, read))) {
                     cache.visited += 1;
                     switch (nfa.state(id)) {
                         .byte_range, .sparse, .match, .fail => {
-                            @memcpy(into.row(stride, id), slots);
+                            @memcpy(into.row(stride, keyOf(nfa, id, read)), slots);
                             break;
                         },
                         .look => |l| {
@@ -290,7 +317,7 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                             id = l.next;
                         },
                         .binary => |b| {
-                            push(cache, &depth, .{ .explore = b.second });
+                            push(cache, &depth, .{ .explore = .{ .id = b.second, .read = read } });
                             id = b.first;
                         },
                         .alternation => |slice| {
@@ -298,7 +325,7 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                             var k = alts.len;
                             while (k > 1) {
                                 k -= 1;
-                                push(cache, &depth, .{ .explore = alts[k] });
+                                push(cache, &depth, .{ .explore = .{ .id = alts[k], .read = read } });
                             }
                             id = alts[0];
                         },
@@ -317,6 +344,15 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                                 slots[slot] = null;
                             }
                             id = cl.next;
+                        },
+                        .loop_begin => |next| {
+                            read = false;
+                            id = next;
+                        },
+                        // An iteration past the minimum that read nothing fails.
+                        .loop_end => |next| {
+                            if (!read) break;
+                            id = next;
                         },
                     }
                 }

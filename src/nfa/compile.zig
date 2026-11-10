@@ -15,9 +15,13 @@
 //! pattern's own shape needs (a stack, a property per node) is linear in the HIR. The automaton
 //! is charged apart from the sets translation made; both are bounded by the same limit.
 //!
-//! In ECMAScript (`Options.ecma`) each iteration of a quantified atom that holds groups starts
-//! by clearing their captures, as ECMA-262's RepeatMatcher does: a `clear` state heads each
-//! time the atom may be taken more than once.
+//! In ECMAScript (`Options.ecma`) a repetition means what ECMA-262's RepeatMatcher says, chosen
+//! in one place (`Repeats`): each iteration of a quantified atom that holds groups starts by
+//! clearing their captures (a `clear` state heads each time the atom may be taken more than
+//! once), and an iteration past the minimum that matches empty fails (each such time of an
+//! atom that can match empty is bracketed by `loop_begin` and `loop_end`, after Barrière and
+//! Pit-Claudel, "Linear Matching of JavaScript Regular Expressions", PLDI 2024, §4.1). Neither
+//! `(x+)?` nor the clamp of an atom that matches only empty to one time is ECMAScript's.
 //!
 //! ECMAScript's lookahead runs on the derivative engine, not on this automaton; until that is
 //! built a pattern holding one is refused (`Unsupported`, `unsupported_lookahead`).
@@ -42,7 +46,8 @@ pub const Options = struct {
     utf8: bool = true,
     /// Where a refusal points. The HIR keeps no spans: the pattern's whole span.
     span: Ast.Span = .{ .start = 0, .end = 0 },
-    /// ECMA-262's iterations: each clears the captures of the groups in its atom.
+    /// ECMA-262's iterations: each clears the captures of the groups in its atom, and one past
+    /// the minimum that matches empty fails.
     ecma: bool = false,
 };
 
@@ -59,7 +64,7 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     const limit = options.limits.nfa.raw();
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .ecma = options.ecma };
+    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma } };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
@@ -103,8 +108,41 @@ const BState = union(enum) {
     alternation: Union,
     capture: struct { group: u32, slot: u32, next: u32 },
     clear: struct { first: u32, end: u32, next: u32 },
+    loop_begin: u32,
+    loop_end: u32,
     fail,
     match,
+};
+
+/// What a repetition means, which the dialect chooses: here, and nowhere else.
+const Repeats = struct {
+    /// ECMA-262's RepeatMatcher; otherwise regex-automata's (Rust's).
+    ecma: bool,
+
+    /// The times kept of a repetition of what matches only the empty string. Rust takes it
+    /// at most once, as regex-syntax does. In ECMAScript every time past the minimum fails, so
+    /// it is taken its minimum, at most once, since one empty time is as good as many.
+    fn clamp(r: Repeats, min: u32, max: ?u32) struct { min: u32, max: u32 } {
+        if (r.ecma) return .{ .min = @min(min, 1), .max = @min(min, 1) };
+        return .{ .min = @min(min, 1), .max = @min(max orelse 1, 1) };
+    }
+
+    /// Whether each time past the minimum of an operand is bracketed by `loop_begin` and
+    /// `loop_end`: in ECMAScript, where the operand can match empty.
+    fn checks(r: Repeats, empty_ok: bool) bool {
+        return r.ecma and empty_ok;
+    }
+
+    /// Whether `x*` over an `x` that can match empty is `(x+)?`, so that once `x` has matched
+    /// empty the loop prefers to stop (regex issue 779): Rust's.
+    fn plusQuestion(r: Repeats, empty_ok: bool) bool {
+        return !r.ecma and empty_ok;
+    }
+
+    /// Whether each time of an atom that may be taken more than once clears its groups first.
+    fn clears(r: Repeats) bool {
+        return r.ecma;
+    }
 };
 
 /// What a node can match, read once per node, children first.
@@ -159,7 +197,7 @@ const Compiler = struct {
     scratch: Allocator,
     b: Builder,
     hir: *const Hir,
-    ecma: bool,
+    repeats: Repeats,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
@@ -287,8 +325,9 @@ const Compiler = struct {
                     var min = r.min;
                     var max = r.max;
                     if (c.props[@backingInt(r.sub)].only_empty) {
-                        min = @min(min, 1);
-                        max = @min(max orelse 1, 1);
+                        const kept = c.repeats.clamp(min, max);
+                        min = kept.min;
+                        max = kept.max;
                     }
                     if (max == 0) return try c.empty();
                     if (min == 1 and max == 1) {
@@ -360,7 +399,7 @@ const Compiler = struct {
                     }
                     return .{ .finished = try c.repeat(f.*, r, template) };
                 }
-                if (c.ecma and (f.max orelse 2) > 1) if (c.props[@backingInt(r.sub)].groups) |g| {
+                if (c.repeats.clears() and (f.max orelse 2) > 1) if (c.props[@backingInt(r.sub)].groups) |g| {
                     const first = std.math.mul(u32, g[0], 2) catch return error.TooLarge;
                     const end = std.math.add(u32, std.math.mul(u32, g[1], 2) catch return error.TooLarge, 2) catch return error.TooLarge;
                     f.clear = try c.b.add(.{ .clear = .{ .first = first, .end = end, .next = unset } });
@@ -372,18 +411,34 @@ const Compiler = struct {
     }
 
     /// `frame`'s repetition of `template`, the operand's states just made, which nothing has
-    /// joined yet: each further time is a copy of them, all made before any is joined.
+    /// joined yet: each further time is a copy of them, all made before any is joined. Where
+    /// `Repeats.checks`, each time past the minimum is bracketed by `loop_begin` and `loop_end`,
+    /// and an unbounded loop goes round a copy of its own, apart from the mandatory times.
     fn repeat(c: *Compiler, frame: Frame, r: Hir.Repetition, template: Fragment) BuildError!Fragment {
         const lo = frame.lo;
         const hi = c.b.len();
-        const count: u32 = frame.max orelse @max(frame.min, 1);
+        const empty_ok = c.props[@backingInt(r.sub)].empty_ok;
+        const checked = c.repeats.checks(empty_ok);
+        const count: u32 = frame.max orelse if (checked) frame.min + 1 else @max(frame.min, 1);
         var copies: u32 = 1;
         while (copies < count) : (copies += 1) try c.b.copy(lo, hi);
         const times: Times = .{ .template = template, .width = hi - lo };
         const lazy = !r.greedy;
         const max = frame.max orelse {
+            if (checked) {
+                // Round and round a time that must read something: `loop_end` stops one that
+                // read nothing, and the loop's other way leaves.
+                const loop = try c.b.addUnion(2, lazy);
+                const body = try c.checkedTime(times.at(frame.min));
+                c.b.patch(loop, body.start);
+                c.b.patch(body.end, loop);
+                if (frame.min == 0) return .{ .start = loop, .end = loop };
+                const prefix = c.chain(times, 0, frame.min);
+                c.b.patch(prefix.end, loop);
+                return .{ .start = prefix.start, .end = loop };
+            }
             if (frame.min == 0) {
-                if (!c.props[@backingInt(r.sub)].empty_ok) {
+                if (!c.repeats.plusQuestion(empty_ok)) {
                     const loop = try c.b.addUnion(2, lazy);
                     c.b.patch(loop, template.start);
                     c.b.patch(template.end, loop);
@@ -423,12 +478,23 @@ const Compiler = struct {
         while (j < max) : (j += 1) {
             const option = try c.b.addUnion(2, lazy);
             if (prev == unset) start = option else c.b.patch(prev, option);
-            c.b.patch(option, times.at(j).start);
+            const time = if (checked) try c.checkedTime(times.at(j)) else times.at(j);
+            c.b.patch(option, time.start);
             c.b.patch(option, end);
-            prev = times.at(j).end;
+            prev = time.end;
         }
         c.b.patch(prev, end);
         return .{ .start = start, .end = end };
+    }
+
+    /// `time` bracketed by `loop_begin` and `loop_end`: a time past the minimum, which fails if
+    /// it reads nothing.
+    fn checkedTime(c: *Compiler, time: Fragment) BuildError!Fragment {
+        const begin = try c.b.add(.{ .loop_begin = unset });
+        const end = try c.b.add(.{ .loop_end = unset });
+        c.b.patch(begin, time.start);
+        c.b.patch(time.end, end);
+        return .{ .start = begin, .end = end };
     }
 
     /// Times `from` to `to` of a repetition, joined one after another.
@@ -600,6 +666,7 @@ const Builder = struct {
             .look => |*l| l.next = to,
             .capture => |*cap| cap.next = to,
             .clear => |*cl| cl.next = to,
+            .loop_begin, .loop_end => |*next| next.* = to,
             .alternation => |*u| {
                 aegis.assert.invariant(u.filled < u.len, "an alternation is joined to as many states as it holds");
                 const slot = if (u.lazy) u.len - 1 - u.filled else u.filled;
@@ -624,6 +691,8 @@ const Builder = struct {
                 .look => |l| .{ .look = .{ .look = l.look, .next = move.id(l.next) } },
                 .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = move.id(cap.next) } },
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = move.id(cl.next) } },
+                .loop_begin => |next| .{ .loop_begin = move.id(next) },
+                .loop_end => |next| .{ .loop_end = move.id(next) },
                 .sparse => |slice| blk: {
                     try room(b.trans.items.len, slice.len);
                     const start: u32 = @intCast(b.trans.items.len);
@@ -657,6 +726,7 @@ const Builder = struct {
         var transitions: usize = 0;
         var alternatives: usize = 0;
         var looks: Nfa.LookSet = .empty;
+        var loop_checks = false;
         for (states, remap) |s, *r| {
             switch (s) {
                 .empty => {
@@ -670,6 +740,7 @@ const Builder = struct {
                     alternatives += u.len;
                 },
                 .look => |l| looks.insert(l.look),
+                .loop_begin, .loop_end => loop_checks = true,
                 else => {},
             }
             r.* = count;
@@ -734,6 +805,8 @@ const Builder = struct {
                 },
                 .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = map.id(cap.next) } },
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = map.id(cl.next) } },
+                .loop_begin => |next| .{ .loop_begin = map.id(next) },
+                .loop_end => |next| .{ .loop_end = map.id(next) },
                 .fail => .fail,
                 .match => .match,
             };
@@ -776,6 +849,7 @@ const Builder = struct {
             .looks = looks,
             .utf8 = utf8_mode,
             .empty_ok = starts.empty_ok,
+            .loop_checks = loop_checks,
         };
     }
 };

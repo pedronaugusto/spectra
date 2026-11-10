@@ -538,6 +538,7 @@ fn expectWellFormed(nfa: *const Nfa) !void {
     const n = nfa.states.len;
     try testing.expect(nfa.start_anchored.raw() < n and nfa.start_unanchored.raw() < n);
     var matches: usize = 0;
+    var loops: usize = 0;
     for (nfa.states) |s| switch (s) {
         .byte_range => |t| try testing.expect(t.lo <= t.hi and t.next.raw() < n),
         .sparse => |slice| {
@@ -556,12 +557,85 @@ fn expectWellFormed(nfa: *const Nfa) !void {
         },
         .capture => |cap| try testing.expect(cap.slot < nfa.slots() and cap.slot / 2 == cap.group and cap.next.raw() < n),
         .clear => |cl| try testing.expect(cl.first < cl.end and cl.end <= nfa.slots() and cl.first % 2 == 0 and cl.end % 2 == 0 and cl.next.raw() < n),
+        .loop_begin, .loop_end => |next| {
+            try testing.expect(next.raw() < n);
+            loops += 1;
+        },
         .fail => {},
         .match => matches += 1,
     };
     try testing.expectEqual(@as(usize, 1), matches);
+    try testing.expectEqual(loops > 0, nfa.loop_checks);
 }
 
 test "fuzz: any pattern that translates compiles to a well-formed automaton or is refused by name" {
     try shakedown.check(testing.allocator, {}, anyCompile, .{ .cases = 3000, .seed = 0x4e46 });
+}
+
+test "an ECMAScript time past the minimum of an operand that can match empty is bracketed by the empty check" {
+    const es: Syntax = .{ .dialect = .ecmascript };
+    // `(?:a?)*` loops round one bracketed time (5 to 6) where Rust's (above) is `(?:(?:a?)+)?`:
+    // the time that matched empty fails at 6, so leaving at 4 is what remains.
+    try expectDump("^(?:a?)*", es,
+        \\0>^: slot(0) => 1
+        \\1: look(start_text) => 4
+        \\2: 61 => 6
+        \\3: alt(2, 6)
+        \\4: alt(5, 7)
+        \\5: loop_begin => 3
+        \\6: loop_end => 4
+        \\7: slot(1) => 8
+        \\8: match
+        \\
+    );
+    // The minimum is not checked (2 to 3); each optional time is, the second reached only
+    // through the first's end.
+    try expectDump("^(?:a?){1,3}", es,
+        \\0>^: slot(0) => 1
+        \\1: look(start_text) => 3
+        \\2: 61 => 8
+        \\3: alt(2, 8)
+        \\4: 61 => 10
+        \\5: alt(4, 10)
+        \\6: 61 => 13
+        \\7: alt(6, 13)
+        \\8: alt(9, 14)
+        \\9: loop_begin => 5
+        \\10: loop_end => 11
+        \\11: alt(12, 14)
+        \\12: loop_begin => 7
+        \\13: loop_end => 14
+        \\14: slot(1) => 15
+        \\15: match
+        \\
+    );
+    // One time only: checked, and nothing to clear.
+    try expectDump("^(a?)?", es,
+        \\0>^: slot(0) => 1
+        \\1: look(start_text) => 6
+        \\2: slot(2) => 4
+        \\3: 61 => 5
+        \\4: alt(3, 5)
+        \\5: slot(3) => 8
+        \\6: alt(7, 9)
+        \\7: loop_begin => 2
+        \\8: loop_end => 9
+        \\9: slot(1) => 10
+        \\10: match
+        \\
+    );
+    // An operand that cannot match empty has nothing to check: Rust's shape, and no thread
+    // carries a bit.
+    var c = try compiled("^(?:a)*", es);
+    defer c.deinit();
+    try testing.expect(!c.nfa.loop_checks);
+    try expectDump("^(?:a)*", es,
+        \\0>^: slot(0) => 1
+        \\1: look(start_text) => 3
+        \\2: 61 => 3
+        \\3: alt(2, 4)
+        \\4: slot(1) => 5
+        \\5: match
+        \\
+    );
 }

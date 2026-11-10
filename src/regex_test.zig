@@ -102,6 +102,22 @@ test "an ECMAScript iteration starts with its atom's captures cleared; Rust's ke
     try expectGroups("(?:(a)|b){2}", ecma, "ab", &.{ ab, null });
 }
 
+test "an ECMAScript iteration past the minimum that matches empty fails; Rust's is taken" {
+    const none: Regex.Span = .{ .start = 0, .end = 0 };
+    // Node's verdicts on each.
+    try expectGroups("(a*)*", ecma, "b", &.{ none, null });
+    try expectGroups("(a*)*", .{}, "b", &.{ none, none });
+    // The minimum's iteration is not checked.
+    try expectGroups("(a*)+", ecma, "", &.{ none, none });
+    // The empty alternative fails past the first time, so the next takes `a`.
+    try expectGroups("(|a)+", ecma, "a", &.{ .{ .start = 0, .end = 1 }, .{ .start = 0, .end = 1 } });
+    try expectGroups("(a?)?", ecma, "", &.{ none, null });
+    try expectGroups("(?:a?){1,3}", ecma, "a", &.{.{ .start = 0, .end = 1 }});
+    // The third time would match `b?` empty, so it fails and the second's captures stand,
+    // the inner group cleared at its start.
+    try expectGroups("((a)|b?)*", ecma, "ab", &.{ .{ .start = 0, .end = 2 }, .{ .start = 1, .end = 2 }, null });
+}
+
 test "a refused pattern says where and why" {
     var d: Regex.Diagnostic = .{};
     try testing.expectError(error.Invalid, Regex.compile(gpa, .init("a(b"), .{ .diagnostic = &d }));
@@ -163,34 +179,44 @@ test "fuzz: the PikeVM's match and captures are the backtracker's" {
 
 // The linear bound, counted.
 
-fn visited(pattern: []const u8, haystack: []const u8) !struct { visited: usize, states: usize } {
-    var re = try compiled(pattern, .{});
+fn visited(pattern: []const u8, syntax: Syntax, haystack: []const u8) !struct { visited: usize, threads: usize } {
+    var re = try compiled(pattern, syntax);
     defer re.deinit();
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     _ = re.find(&cache, .of(haystack));
-    return .{ .visited = cache.pike.visited, .states = re.nfa.states.len };
+    return .{ .visited = cache.pike.visited, .threads = pikevm.sizes(&re.nfa).threads };
 }
 
 test "a search's work is linear in the haystack on what makes a backtracker exponential" {
-    const cases = [_]struct { pattern: []const u8, fill: u8 }{
+    const cases = [_]struct { pattern: []const u8, syntax: Syntax = .{}, fill: u8, checked: bool = false }{
         .{ .pattern = "(a*)*b", .fill = 'a' },
         .{ .pattern = "(a|a)*b", .fill = 'a' },
         .{ .pattern = "(x+x+)+y", .fill = 'x' },
         .{ .pattern = "(?:a?){32}a{32}", .fill = 'a' },
         .{ .pattern = "(\\w+\\s?)+$", .fill = 'w' },
+        // ECMAScript's empty checks: each thread a state and a bit, twice the threads, and
+        // still linear.
+        .{ .pattern = "(a*)*b", .syntax = ecma, .fill = 'a', .checked = true },
+        .{ .pattern = "(a?)*b", .syntax = ecma, .fill = 'a', .checked = true },
+        .{ .pattern = "((a|)*)*b", .syntax = ecma, .fill = 'a', .checked = true },
+        .{ .pattern = "(|a)+b", .syntax = ecma, .fill = 'a', .checked = true },
+        .{ .pattern = "(?:a?){0,32}a{32}", .syntax = ecma, .fill = 'a', .checked = true },
     };
     const big = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(big);
     for (cases) |case| {
         @memset(big, case.fill);
-        const small = try visited(case.pattern, big[0 .. 16 * 1024]);
-        const large = try visited(case.pattern, big);
-        // Each position enters each state at most twice: once in a closure, once stepped.
-        try testing.expect(large.visited <= 2 * large.states * (big.len + 1));
-        // Four times the haystack is four times the work, give or take the ends.
+        const small = try visited(case.pattern, case.syntax, big[0 .. 16 * 1024]);
+        const large = try visited(case.pattern, case.syntax, big);
         errdefer std.debug.print("/{s}/: {d} then {d}\n", .{ case.pattern, small.visited, large.visited });
-        try testing.expect(large.visited <= 4 * small.visited + 4 * large.states);
+        var re = try compiled(case.pattern, case.syntax);
+        defer re.deinit();
+        try testing.expectEqual(case.checked, re.nfa.loop_checks);
+        // Each position enters each thread at most twice: once in a closure, once stepped.
+        try testing.expect(large.visited <= 2 * large.threads * (big.len + 1));
+        // Four times the haystack is four times the work, give or take the ends.
+        try testing.expect(large.visited <= 4 * small.visited + 4 * large.threads);
     }
 }
 

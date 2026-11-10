@@ -3,6 +3,7 @@
 //! against what spectra's ECMAScript dialect finds.
 const std = @import("std");
 const strand = @import("strand");
+const shakedown = @import("shakedown");
 const v8_verdicts = @import("v8_verdicts");
 const Regex = @import("Regex.zig");
 const Syntax = @import("Syntax.zig");
@@ -45,11 +46,6 @@ const Tally = struct {
     /// Without `u` or `v`, over a haystack past U+FFFF: V8 reads UTF-16 code units, spectra a
     /// whole code point (`.`, a negated class).
     differ_code_units: usize = 0,
-    /// A quantified group whose iteration can match empty: ECMA-262 fails such an iteration
-    /// (RepeatMatcher's empty check), which spectra does not yet do. Every difference left is
-    /// one: /(a*)*/, /(a*|b)*/, /(|a)+/, /(a*)?/ and patterns holding them.
-    differ_repetition_span: usize = 0,
-    differ_repetition_groups: usize = 0,
     /// Whether a match exists, outside the code unit cases: always V8's.
     is_match_differ: usize = 0,
     /// ECMA-262's semantics as written (testing/ecma.zig) against V8: every case agrees but
@@ -63,14 +59,6 @@ const Tally = struct {
 fn codeUnits(case: Case) bool {
     if (std.mem.indexOfAny(u8, case.flags, "uv") != null) return false;
     for (case.haystack) |b| if (b >= 0xf0) return true;
-    return false;
-}
-
-/// A group under a quantifier: `)` followed by `*`, `+`, `?` or `{`.
-fn quantifiedGroup(pattern: []const u8) bool {
-    for (pattern[0..pattern.len -| 1], 1..) |c, i| {
-        if (c == ')' and std.mem.indexOfScalar(u8, "*+?{", pattern[i]) != null) return true;
-    }
     return false;
 }
 
@@ -143,8 +131,6 @@ test "V8's verdicts, through the ECMAScript dialect" {
             tally.agree += 1;
         } else if (units) {
             tally.differ_code_units += 1;
-        } else if (quantifiedGroup(case.pattern)) {
-            if (same_span) tally.differ_repetition_groups += 1 else tally.differ_repetition_span += 1;
         } else {
             std.debug.print("/{s}/{s} on {any}: {any}, V8 {any}\n", .{ case.pattern, case.flags, case.haystack, if (found) groups else null, case.match });
             return error.TestUnexpectedResult;
@@ -152,17 +138,86 @@ test "V8's verdicts, through the ECMAScript dialect" {
     }
     try testing.expectEqualStrings("v26.10.0", file.node);
     // Counted, so a change in either direction shows. Captures clear per iteration (17 cases
-    // came to agree); the empty check awaits its design.
+    // came to agree) and an iteration past the minimum that matched empty fails (the rest): the
+    // engine now says what the oracle says on every case, and differs from V8 only where V8
+    // reads code units.
     try testing.expectEqual(Tally{
         .cases = 9480,
-        .agree = 9220,
+        .agree = 9422,
         .refused_code_unit_split = 55,
-        .differ_code_units = 8,
-        .differ_repetition_span = 38,
-        .differ_repetition_groups = 159,
+        .differ_code_units = 3,
         .is_match_differ = 0,
         .oracle_agree = 9422,
         .oracle_code_units = 3,
         .oracle_budget = 0,
     }, tally);
+}
+
+// The ECMAScript dialect against ECMA-262 as written, on any small pattern.
+
+const pieces = [_][]const u8{ "a", "a", "a", "b", "b", "_", " ", "\n", "\u{e9}", "\u{2028}", "\u{1f600}" };
+
+/// A pattern from a small grammar that reaches what the empty check is about: groups, captured
+/// or not, that can match empty, nested and quantified, alternatives with an empty branch.
+fn write(s: anytype, out: *std.ArrayList(u8), a: std.mem.Allocator, depth: u32) !void {
+    const leaves = [_][]const u8{ "a", "b", "", "a?", "b*", "\\b", "^", "$", ".", "[ab]", "\\w" };
+    const quantifiers = [_][]const u8{ "", "*", "+", "?", "{0,2}", "{1,3}", "{2}", "*?", "+?", "??", "{0,}" };
+    switch (if (depth == 0) 0 else shakedown.gen.intRange(s, usize, 0, 3)) {
+        0 => try out.appendSlice(a, leaves[shakedown.gen.intRange(s, usize, 0, leaves.len - 1)]),
+        1 => {
+            try out.appendSlice(a, if (shakedown.gen.boolean(s)) "(" else "(?:");
+            try write(s, out, a, depth - 1);
+            try out.appendSlice(a, ")");
+            try out.appendSlice(a, quantifiers[shakedown.gen.intRange(s, usize, 0, quantifiers.len - 1)]);
+        },
+        2 => {
+            try write(s, out, a, depth - 1);
+            try out.appendSlice(a, "|");
+            try write(s, out, a, depth - 1);
+        },
+        else => {
+            try write(s, out, a, depth - 1);
+            try write(s, out, a, depth - 1);
+        },
+    }
+}
+
+fn anyOracle(_: void, case: *shakedown.Case) !void {
+    const s = case.source;
+    var state: std.heap.ArenaAllocator = .init(case.gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    var out: std.ArrayList(u8) = .empty;
+    try write(s, &out, a, 4);
+    const pattern = out.items;
+    const options = [_][]const u8{ "", "u", "v", "i", "m", "s", "ui", "vi" };
+    const flags = options[shakedown.gen.intRange(s, usize, 0, options.len - 1)];
+    var haystack: std.ArrayList(u8) = .empty;
+    for (0..shakedown.gen.intRange(s, usize, 0, 6)) |_| try haystack.appendSlice(a, pieces[shakedown.gen.intRange(s, usize, 0, pieces.len - 1)]);
+    case.note("/{s}/{s} on {any}", .{ pattern, flags, haystack.items });
+    var re = Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntaxOf(flags) }) catch |err| switch (err) {
+        error.Invalid, error.Unsupported, error.TooLarge => return,
+        error.OutOfMemory => return err,
+    };
+    defer re.deinit();
+    var cache = try re.cache(case.gpa);
+    defer cache.deinit(case.gpa);
+    const ast = try a.create(@import("syntax/Ast.zig"));
+    ast.* = try parse.parse(a, .init(pattern), syntaxOf(flags), .{}, null);
+    const hir = try translate.translate(a, ast, syntaxOf(flags), .{}, null);
+    const said = ecma.exec(a, &hir, haystack.items, 100_000) catch |err| switch (err) {
+        error.Budget => return,
+        else => return err,
+    };
+    const groups = try a.alloc(?Regex.Span, re.captureCount());
+    const found = re.captures(&cache, .of(haystack.items), groups);
+    try testing.expectEqual(said != null, found);
+    if (said) |want| for (want, groups) |w, g| {
+        try testing.expectEqual(w == null, g == null);
+        if (w) |x| try testing.expect(x.start == g.?.start and x.end == g.?.end);
+    };
+}
+
+test "fuzz: the ECMAScript dialect's match and captures are ECMA-262's" {
+    try shakedown.check(testing.allocator, {}, anyOracle, .{ .cases = 5000, .seed = 0xec3a });
 }

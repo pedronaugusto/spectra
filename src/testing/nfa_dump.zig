@@ -28,6 +28,8 @@ pub fn dump(a: std.mem.Allocator, nfa: *const Nfa) ![]const u8 {
             },
             .capture => |cap| try w.print("slot({d}) => {d}", .{ cap.slot, cap.next.raw() }),
             .clear => |cl| try w.print("clear({d}..{d}) => {d}", .{ cl.first, cl.end, cl.next.raw() }),
+            .loop_begin => |next| try w.print("loop_begin => {d}", .{next.raw()}),
+            .loop_end => |next| try w.print("loop_end => {d}", .{next.raw()}),
             .fail => try w.writeAll("fail"),
             .match => try w.writeAll("match"),
         }
