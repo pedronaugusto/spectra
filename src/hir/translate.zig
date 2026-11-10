@@ -541,6 +541,9 @@ const Translator = struct {
                 .general_category => special(v, .loose) orelse category(v, .loose) orelse return t.fail(span, .unicode_property_unknown),
                 .script => .{ .table = properties.scriptRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
                 .script_extensions => .{ .table = properties.scriptExtensionRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
+                .grapheme_cluster_break => .{ .table = properties.graphemeBreakRanges(properties.graphemeBreakNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
+                .word_break => .{ .table = properties.wordBreakRanges(properties.wordBreakNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
+                .sentence_break => .{ .table = properties.sentenceBreakRanges(properties.sentenceBreakNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
                 .binary => return t.fail(span, .unicode_property_unknown),
             };
         }
@@ -559,7 +562,7 @@ const Translator = struct {
                 .general_category => category(v, .exact) orelse aegis.assert.never("the parser held the value to ECMA-262's table"),
                 .script => .{ .table = properties.scriptRanges(properties.scriptNamed(v, .exact).?) },
                 .script_extensions => .{ .table = properties.scriptExtensionRanges(properties.scriptNamed(v, .exact).?) },
-                .binary => aegis.assert.never("the parser held `name=value` to the three properties that take a value"),
+                .grapheme_cluster_break, .word_break, .sentence_break, .binary => aegis.assert.never("the parser held `name=value` to the three properties that take a value"),
             };
         }
         if (special(u.name, .exact)) |what| return what;
@@ -835,7 +838,7 @@ fn isTrail(cp: u21) bool {
 
 /// The properties Rust's regex takes `name=value` for that have no data here.
 fn unsupportedByValue(name: []const u8) bool {
-    for ([_][]const u8{ "age", "gcb", "graphemeclusterbreak", "wb", "wordbreak", "sb", "sentencebreak" }) |known| {
+    for ([_][]const u8{"age"}) |known| {
         if (looseIs(name, known)) return true;
     }
     return false;

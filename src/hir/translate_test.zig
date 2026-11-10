@@ -228,7 +228,12 @@ test "Rust: Unicode names compare loosely, a script alone is its extensions, and
     try expectRefused("\\p{gc=Klingon}", .{}, error.Invalid, .unicode_property_unknown);
     try expectRefused("\\p{Script}", .{}, error.Invalid, .unicode_property_unknown);
     try expectRefused("\\p{age=3.0}", .{}, error.Unsupported, .unsupported_unicode_property);
-    try expectRefused("\\p{wb=Numeric}", .{}, error.Unsupported, .unsupported_unicode_property);
+    // The break properties are xenoglyph's ranges; their obsolete values name nothing.
+    try testing.expect(try takes("\\p{wb=Numeric}", .{}, '7'));
+    try testing.expect(!try takes("\\p{wb=Numeric}", .{}, 'a'));
+    try testing.expect(try takes("\\p{gcb=RI}", .{}, 0x1f1e6));
+    try testing.expect(try takes("\\p{Sentence_Break=Lower}", .{}, 'a'));
+    try expectRefused("\\p{gcb=E_Base}", .{}, error.Invalid, .unicode_property_unknown);
     // Any, ASCII and Assigned are General_Category's values too, and a leading `is` is dropped
     // from every name, as regex-syntax reads them.
     try testing.expect(try takes("\\p{gc=Any}", .{}, 0x10ffff));

@@ -5,10 +5,7 @@
 //! searches, leftmost-longest matching, and a line terminator other than `\n`.
 //!
 //! regex bounds a repetition only by the automaton's size, so the suite compiles with
-//! `Limits.repetition` at its largest. The break properties (Grapheme_Cluster_Break,
-//! Word_Break, Sentence_Break) are xenoglyph's gap: it answers them for one code point and
-//! holds no ranges of them. Until it does, the tests naming them must be refused by name,
-//! `unsupported_unicode_property`, and nothing else may fail.
+//! `Limits.repetition` at its largest. Every test run must agree.
 const std = @import("std");
 const strand = @import("strand");
 const regex_suite = @import("regex_suite");
@@ -25,24 +22,9 @@ const Expected = struct {
     groups_given: bool,
 };
 
-/// regex's tests that name a break property, refused until xenoglyph holds their ranges.
-const break_property_tests = [_][]const u8{
-    "class-gcb1",            "class-gcb2",            "class-gcb3",            "class-gcb5",
-    "class-gcb6",            "class-word-break1",     "class-word-break2",     "class-word-break3",
-    "class-word-break4",     "class-word-break5",     "class-sentence-break1", "class-sentence-break2",
-    "class-sentence-break3", "class-sentence-break4", "class-sentence-break5",
-};
-
-fn awaitsBreakProperties(file: []const u8, name: []const u8) bool {
-    if (!std.mem.eql(u8, file, "unicode")) return false;
-    for (break_property_tests) |n| if (std.mem.eql(u8, n, name)) return true;
-    return false;
-}
-
 const Tally = struct {
     run: usize = 0,
     passed: usize = 0,
-    refused_break_property: usize = 0,
     failed: usize = 0,
     skipped_sets: usize = 0,
     skipped_search_kind: usize = 0,
@@ -156,10 +138,6 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
     var d: Regex.Diagnostic = .{};
     const limits: @import("Limits.zig") = .{ .repetition = .literal(100_000) };
     var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d }) catch |err| {
-        if (awaitsBreakProperties(file, name) and err == error.Unsupported and d.reason == .unsupported_unicode_property) {
-            tally.refused_break_property += 1;
-            return;
-        }
         if (flag(t, "compiles", true)) {
             std.debug.print("{s}/{s}: /{s}/ refused: {t} {t}\n", .{ file, name, pattern, err, d.reason });
             tally.failed += 1;
@@ -167,11 +145,6 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
         return;
     };
     defer re.deinit();
-    if (awaitsBreakProperties(file, name)) {
-        std.debug.print("{s}/{s}: /{s}/ compiled: take it off the break property list\n", .{ file, name, pattern });
-        tally.failed += 1;
-        return;
-    }
     if (!flag(t, "compiles", true)) {
         std.debug.print("{s}/{s}: /{s}/ compiled, regex refuses it\n", .{ file, name, pattern });
         tally.failed += 1;
@@ -241,11 +214,10 @@ test "regex's own test suite, through the Rust dialect" {
         for (tests) |t| try runOne(a, file.name, t, &tally);
     }
     try testing.expectEqual(@as(usize, 0), tally.failed);
-    // Counted, so a test quietly passed over shows: 1076 run, 1061 agree, 15 await xenoglyph.
+    // Counted, so a test quietly passed over shows: every one run agrees.
     try testing.expectEqual(Tally{
         .run = 1076,
-        .passed = 1061,
-        .refused_break_property = 15,
+        .passed = 1076,
         .skipped_sets = 53,
         .skipped_search_kind = 50,
         .skipped_match_kind = 4,
