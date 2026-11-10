@@ -47,6 +47,15 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         .span = whole,
         .ecma = options.syntax.dialect == .ecmascript,
     }, options.diagnostic);
+    errdefer {
+        var held = nfa;
+        held.deinit(gpa);
+    }
+    // What each search's cache would hold, refused before any is made.
+    if ((pikevm.sizes(&nfa).bytes() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
+        return error.TooLarge;
+    }
     return .{ .gpa = gpa, .nfa = nfa };
 }
 

@@ -102,6 +102,48 @@ const Follow = union(enum) {
     restore: struct { slot: u32, value: ?usize },
 };
 
+/// What a `Cache` holds for an automaton, counted: the one figure both the compiler's refusal
+/// (`Limits.cache`) and `Cache.init`'s allocations are made from.
+pub const Sizes = struct {
+    /// Entries of each thread set, and rows of its slot table but the absent row.
+    states: usize,
+    /// Slots per thread.
+    slots: usize,
+    /// Entries of the closure's stack.
+    stack: usize,
+
+    /// The bytes they come to, or null past `usize`.
+    pub fn bytes(s: Sizes) ?usize {
+        const set = mul(s.states, @sizeOf(Nfa.StateId) + @sizeOf(u32)) orelse return null;
+        const table = mul(mul(add(s.states, 1) orelse return null, s.slots) orelse return null, @sizeOf(?usize)) orelse return null;
+        const active = add(set, table) orelse return null;
+        const both = mul(active, 2) orelse return null;
+        const stack = mul(s.stack, @sizeOf(Follow)) orelse return null;
+        const slots = mul(s.slots, @sizeOf(?usize)) orelse return null;
+        return add(add(both, stack) orelse return null, slots);
+    }
+
+    fn mul(x: usize, y: usize) ?usize {
+        return std.math.mul(usize, x, y) catch null;
+    }
+
+    fn add(x: usize, y: usize) ?usize {
+        return std.math.add(usize, x, y) catch null;
+    }
+};
+
+/// What a `Cache` for `nfa` holds. Within one position each state is entered once, and pushes
+/// at most one restore or alternative per state, or its alternatives past the first; a clear
+/// pushes a restore per slot it empties.
+pub fn sizes(nfa: *const Nfa) Sizes {
+    var cleared: usize = 0;
+    for (nfa.states) |s| switch (s) {
+        .clear => |cl| cleared += cl.end - cl.first,
+        else => {},
+    };
+    return .{ .states = nfa.states.len, .slots = nfa.slots(), .stack = nfa.states.len + nfa.alternatives.len + cleared + 1 };
+}
+
 /// What one automaton's searches need, made once: no search allocates.
 pub const Cache = struct {
     curr: Active,
@@ -114,24 +156,17 @@ pub const Cache = struct {
     /// States entered by the last search, summed over its positions.
     visited: usize = 0,
 
+    /// Allocates what `sizes(nfa)` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, nfa: *const Nfa) Allocator.Error!Cache {
-        const states = nfa.states.len;
-        var curr: Active = try .init(gpa, states, nfa.slots());
+        const size = sizes(nfa);
+        var curr: Active = try .init(gpa, size.states, size.slots);
         errdefer curr.deinit(gpa);
-        var next: Active = try .init(gpa, states, nfa.slots());
+        var next: Active = try .init(gpa, size.states, size.slots);
         errdefer next.deinit(gpa);
-        // Within one position each state is entered once, and pushes at most one restore or
-        // alternative per state, or its alternatives past the first.
-        // A clear pushes a restore per slot it empties.
-        var cleared: usize = 0;
-        for (nfa.states) |s| switch (s) {
-            .clear => |cl| cleared += cl.end - cl.first,
-            else => {},
-        };
-        const stack = try gpa.alloc(Follow, states + nfa.alternatives.len + cleared + 1);
+        const stack = try gpa.alloc(Follow, size.stack);
         errdefer gpa.free(stack);
-        const slots = try gpa.alloc(?usize, nfa.slots());
-        return .{ .curr = curr, .next = next, .stack = stack, .slots = slots, .states = states };
+        const slots = try gpa.alloc(?usize, size.slots);
+        return .{ .curr = curr, .next = next, .stack = stack, .slots = slots, .states = size.states };
     }
 
     pub fn deinit(c: *Cache, gpa: Allocator) void {

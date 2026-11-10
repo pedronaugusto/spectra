@@ -66,7 +66,7 @@ pub const Reason = enum {
     unsupported_backreference,
     unsupported_lookbehind,
     unsupported_nested_lookaround,
-    /// A property with no data here: Age and the break properties, and `v`'s properties of strings.
+    /// A property with no data here: Age, and `v`'s properties of strings.
     unsupported_unicode_property,
     /// ECMAScript without `u` or `v`: half of a code point past U+FFFF named alone. A UTF-16
     /// engine matches half a character; a UTF-8 haystack has no halves.
@@ -75,6 +75,8 @@ pub const Reason = enum {
     /// a class holds is at least one transition of the automaton it becomes. Or the automaton
     /// itself past it, a repetition's copies among its states.
     nfa_too_large,
+    /// What one search's `Cache` would hold, past `Limits.cache`: many groups in a long pattern.
+    cache_too_large,
     /// ECMAScript's lookahead, which the derivative engine runs: refused until that engine is in.
     unsupported_lookahead,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.

@@ -4,6 +4,7 @@
 const std = @import("std");
 const shakedown = @import("shakedown");
 const Regex = @import("Regex.zig");
+const Limits = @import("Limits.zig");
 const Syntax = @import("Syntax.zig");
 const pikevm = @import("pikevm.zig");
 const backtrack = @import("testing/backtrack.zig");
@@ -191,4 +192,39 @@ test "a search's work is linear in the haystack on what makes a backtracker expo
         errdefer std.debug.print("/{s}/: {d} then {d}\n", .{ case.pattern, small.visited, large.visited });
         try testing.expect(large.visited <= 4 * small.visited + 4 * large.states);
     }
+}
+
+test "a cache holds what Limits.cache bounds: counted once, refused at compile past it" {
+    // What Cache.init allocates is the figure the compiler checked, byte for byte.
+    var re = try Regex.compile(testing.allocator, .init("(a)(b)+(?:c|d|e)\\w{3}"), .{});
+    defer re.deinit();
+    const want = pikevm.sizes(&re.nfa).bytes().?;
+    var counting: std.testing.FailingAllocator = .init(testing.allocator, .{});
+    var cache = try re.cache(counting.allocator());
+    try testing.expectEqual(want, counting.allocated_bytes);
+    cache.deinit(counting.allocator());
+
+    // At the figure it compiles; a byte under it is refused by name.
+    const at: Limits = .{ .cache = .fromRaw(want) };
+    var held = try Regex.compile(testing.allocator, .init("(a)(b)+(?:c|d|e)\\w{3}"), .{ .limits = at });
+    held.deinit();
+    var d: Regex.Diagnostic = .{};
+    const under: Limits = .{ .cache = .fromRaw(want - 1) };
+    try testing.expectError(error.TooLarge, Regex.compile(testing.allocator, .init("(a)(b)+(?:c|d|e)\\w{3}"), .{ .limits = under, .diagnostic = &d }));
+    try testing.expectEqual(.cache_too_large, d.reason);
+
+    // Many groups in a row: the slot tables grow as states times groups. 300 fit the default,
+    // 500 do not.
+    var a: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer a.deinit();
+    var few = try Regex.compile(testing.allocator, .init(try repeatText(a.allocator(), "(a)", 300)), .{});
+    few.deinit();
+    try testing.expectError(error.TooLarge, Regex.compile(testing.allocator, .init(try repeatText(a.allocator(), "(a)", 500)), .{ .diagnostic = &d }));
+    try testing.expectEqual(.cache_too_large, d.reason);
+}
+
+fn repeatText(a: std.mem.Allocator, unit: []const u8, n: usize) ![]const u8 {
+    const out = try a.alloc(u8, unit.len * n);
+    for (0..n) |i| @memcpy(out[i * unit.len ..][0..unit.len], unit);
+    return out;
 }
