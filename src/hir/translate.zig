@@ -170,6 +170,8 @@ const ClassFrame = struct {
     value: Value = .{},
     /// Its characters and ranges, in the order written: put in order once, when it ends.
     leaves: std.ArrayList([2]u21) = .empty,
+    /// The sets it has read, which it does not read again: a union takes each once.
+    seen: std.AutoHashMapUnmanaged(ItemKey, void) = .empty,
     done: Done,
 };
 
@@ -540,9 +542,26 @@ const Translator = struct {
     }
 
     fn unicode(t: *Translator, value: *Value, u: Ast.Unicode, span: Ast.Span) Error!void {
+        try t.unicodeNamed(value, u, try t.named(u, span));
+    }
+
+    /// What `u` names, found but not yet read into a set.
+    fn named(t: *Translator, u: Ast.Unicode, span: Ast.Span) Error!Named {
         if (!t.codePoints()) return t.fail(span, .unicode_not_allowed);
+        return if (t.dialect == .rust) t.rustProperty(u, span) else t.ecmaProperty(u, span);
+    }
+
+    fn unicodeNamed(t: *Translator, value: *Value, u: Ast.Unicode, what: Named) Error!void {
         var set: CodePoints = .{};
-        if (t.dialect == .rust) try t.rustProperty(&set, u, span) else try t.ecmaProperty(&set, u, span);
+        switch (what) {
+            .table => |table| try addAll(t.sets, &set, table),
+            .any => try set.add(t.sets, .{ 0, 0x10ffff }),
+            .ascii => try set.add(t.sets, .{ 0, 0x7f }),
+            .assigned => {
+                try addAll(t.sets, &set, properties.generalCategoryRanges(.unassigned));
+                try set.negate(t.sets);
+            },
+        }
         // Rust and `v` fold what is named and take its complement; `u` complements first, and
         // the class closes after. What is not negated closes with its class, or alone where it
         // stands: closing a union is the union of the closings.
@@ -555,65 +574,43 @@ const Translator = struct {
 
     /// regex-syntax's order: `name=value`; alone, a binary property, a general category (with
     /// Any, ASCII and Assigned), then a script, by its Script_Extensions. Names compare loosely.
-    fn rustProperty(t: *Translator, set: *CodePoints, u: Ast.Unicode, span: Ast.Span) Error!void {
+    fn rustProperty(t: *Translator, u: Ast.Unicode, span: Ast.Span) Error!Named {
         if (u.value) |v| {
             const property = properties.propertyNamed(u.name, .loose) orelse {
                 if (unsupportedByValue(u.name)) return t.unsupported(span, .unsupported_unicode_property);
                 return t.fail(span, .unicode_property_unknown);
             };
-            switch (property) {
+            return switch (property) {
                 // regex-syntax reads Any, ASCII and Assigned as values of General_Category too.
-                .general_category => if (!try t.special(set, v, .loose) and !try t.category(set, v, .loose)) return t.fail(span, .unicode_property_unknown),
-                .script => try addAll(t.sets, set, properties.scriptRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
-                .script_extensions => try addAll(t.sets, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
+                .general_category => special(v, .loose) orelse category(v, .loose) orelse return t.fail(span, .unicode_property_unknown),
+                .script => .{ .table = properties.scriptRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
+                .script_extensions => .{ .table = properties.scriptExtensionRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown)) },
                 .binary => return t.fail(span, .unicode_property_unknown),
-            }
-            return;
+            };
         }
-        if (properties.binaryNamed(u.name, .loose)) |b| return addAll(t.sets, set, properties.binaryRanges(b));
-        if (try t.special(set, u.name, .loose)) return;
-        if (try t.category(set, u.name, .loose)) return;
+        if (properties.binaryNamed(u.name, .loose)) |b| return .{ .table = properties.binaryRanges(b) };
+        if (special(u.name, .loose)) |what| return what;
+        if (category(u.name, .loose)) |what| return what;
         const script = properties.scriptNamed(u.name, .loose) orelse return t.fail(span, .unicode_property_unknown);
-        try addAll(t.sets, set, properties.scriptExtensionRanges(script));
+        return .{ .table = properties.scriptExtensionRanges(script) };
     }
 
     /// The parser has held the name to ECMA-262's tables: what is left is finding it.
-    fn ecmaProperty(t: *Translator, set: *CodePoints, u: Ast.Unicode, span: Ast.Span) Error!void {
+    fn ecmaProperty(t: *Translator, u: Ast.Unicode, span: Ast.Span) Error!Named {
         if (u.value) |v| {
             const property = properties.propertyNamed(u.name, .exact) orelse aegis.assert.never("the parser held the property to ECMA-262's table");
-            switch (property) {
-                .general_category => _ = try t.category(set, v, .exact),
-                .script => try addAll(t.sets, set, properties.scriptRanges(properties.scriptNamed(v, .exact).?)),
-                .script_extensions => try addAll(t.sets, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .exact).?)),
+            return switch (property) {
+                .general_category => category(v, .exact) orelse aegis.assert.never("the parser held the value to ECMA-262's table"),
+                .script => .{ .table = properties.scriptRanges(properties.scriptNamed(v, .exact).?) },
+                .script_extensions => .{ .table = properties.scriptExtensionRanges(properties.scriptNamed(v, .exact).?) },
                 .binary => aegis.assert.never("the parser held `name=value` to the three properties that take a value"),
-            }
-            return;
+            };
         }
-        if (try t.special(set, u.name, .exact)) return;
-        if (try t.category(set, u.name, .exact)) return;
-        if (properties.binaryNamed(u.name, .exact)) |b| return addAll(t.sets, set, properties.binaryRanges(b));
+        if (special(u.name, .exact)) |what| return what;
+        if (category(u.name, .exact)) |what| return what;
+        if (properties.binaryNamed(u.name, .exact)) |b| return .{ .table = properties.binaryRanges(b) };
         // A property of strings: no sequences are tabulated here.
         return t.unsupported(span, .unsupported_unicode_property);
-    }
-
-    fn special(t: *Translator, set: *CodePoints, name: []const u8, match: properties.NameMatch) Error!bool {
-        if (nameIs(name, "Any", match)) {
-            try set.add(t.sets, .{ 0, 0x10ffff });
-        } else if (nameIs(name, "ASCII", match)) {
-            try set.add(t.sets, .{ 0, 0x7f });
-        } else if (nameIs(name, "Assigned", match)) {
-            try addAll(t.sets, set, properties.generalCategoryRanges(.unassigned));
-            try set.negate(t.sets);
-        } else return false;
-        return true;
-    }
-
-    fn category(t: *Translator, set: *CodePoints, name: []const u8, match: properties.NameMatch) Error!bool {
-        switch (properties.generalCategoryNamed(name, match) orelse return false) {
-            .category => |c| try addAll(t.sets, set, properties.generalCategoryRanges(c)),
-            .group => |g| try addAll(t.sets, set, properties.generalCategoryGroupRanges(g)),
-        }
-        return true;
     }
 
     fn asciiClass(t: *Translator, value: *Value, a: Ast.Ascii, span: Ast.Span) Error!void {
@@ -648,12 +645,20 @@ const Translator = struct {
             },
             .range => |r| try frame.leaves.append(t.sets, .{ try t.scalarItem(r[0], false, span), try t.scalarItem(r[1], false, span) }),
             .hex_range => |r| try frame.leaves.append(t.sets, .{ try t.scalarItem(r.ends[0], r.hex[0], span), try t.scalarItem(r.ends[1], r.hex[1], span) }),
-            .perl => |p| try t.perl(&frame.value, p, span),
-            .unicode => |u| try t.unicode(&frame.value, u, span),
-            .ascii => |a| try t.asciiClass(&frame.value, a, span),
+            .perl => |p| if (try t.firstSeen(frame, .{ .kind = .perl, .at = @backingInt(p.class), .negated = p.negated })) try t.perl(&frame.value, p, span),
+            .unicode => |u| {
+                const what = try t.named(u, span);
+                if (try t.firstSeen(frame, .ofNamed(what, u.negated))) try t.unicodeNamed(&frame.value, u, what);
+            },
+            .ascii => |a| if (try t.firstSeen(frame, .{ .kind = .ascii_class, .at = @backingInt(a.class), .negated = a.negated })) try t.asciiClass(&frame.value, a, span),
             .strings => |s| try t.strings(frame, s),
             .nested, .operation => aegis.assert.never("the class walk opens nested classes and operations"),
         }
+    }
+
+    /// Whether `frame` reads the set `key` names for the first time; it is marked read.
+    fn firstSeen(t: *Translator, frame: *ClassFrame, key: ItemKey) Error!bool {
+        return (try frame.seen.fetchPut(t.arena, key, {})) == null;
     }
 
     fn strings(t: *Translator, frame: *ClassFrame, slice_of: Ast.Slice) Error!void {
@@ -784,6 +789,47 @@ const Translator = struct {
             if ((op == .intersection and !in_right) or (op == .difference and in_right)) try doomed.append(t.arena, key.*);
         }
         for (doomed.items) |key| _ = left.strings.remove(key);
+    }
+};
+
+/// What a Unicode class names: one of xenoglyph's tables, or a set spectra makes itself.
+const Named = union(enum) {
+    table: []const [2]u21,
+    any,
+    ascii,
+    assigned,
+};
+
+fn special(name: []const u8, match: properties.NameMatch) ?Named {
+    if (nameIs(name, "Any", match)) return .any;
+    if (nameIs(name, "ASCII", match)) return .ascii;
+    if (nameIs(name, "Assigned", match)) return .assigned;
+    return null;
+}
+
+fn category(name: []const u8, match: properties.NameMatch) ?Named {
+    return switch (properties.generalCategoryNamed(name, match) orelse return null) {
+        .category => |c| .{ .table = properties.generalCategoryRanges(c) },
+        .group => |g| .{ .table = properties.generalCategoryGroupRanges(g) },
+    };
+}
+
+/// An item of a class that names a set, as what it resolves to: the same table, Perl or ASCII
+/// class and negation is the same set, whatever its spelling. A class reads each once.
+const ItemKey = struct {
+    kind: enum(u8) { table, any, ascii, assigned, perl, ascii_class },
+    /// The table's address and length, or the Perl or ASCII class.
+    at: usize = 0,
+    len: usize = 0,
+    negated: bool,
+
+    fn ofNamed(what: Named, negated: bool) ItemKey {
+        return switch (what) {
+            .table => |table| .{ .kind = .table, .at = @intFromPtr(table.ptr), .len = table.len, .negated = negated },
+            .any => .{ .kind = .any, .negated = negated },
+            .ascii => .{ .kind = .ascii, .negated = negated },
+            .assigned => .{ .kind = .assigned, .negated = negated },
+        };
     }
 };
 

@@ -461,7 +461,7 @@ test "a class of many characters costs what it names and holds, in any order" {
     try testing.expect(c.spent <= per_byte * (p.items.len + c.out));
 }
 
-test "a class naming one property many times costs what it names, and past the limit is refused" {
+test "a class naming one property many times is one set, charged once" {
     var s: State = .{};
     defer s.deinit();
     const a = s.arena();
@@ -471,17 +471,23 @@ test "a class naming one property many times costs what it names, and past the l
         .{ .open = "(?i)[", .item = "\\pL", .syntax = .{} },
         .{ .open = "[", .item = "\\P{L}", .syntax = with(ecma, true) },
     }) |shape| {
-        const few = try repeated(a, shape.open, shape.item, 100, "]");
-        const c = try charge(few, shape.syntax, .{});
-        try testing.expectEqual(null, c.refused);
-        const named = few.len + 100 * letters * @sizeOf([2]u21);
-        try testing.expect(c.spent <= per_byte * (named + c.out));
-        // The pattern at its longest: past the limit, refused for what it was charged so far.
-        const many = try repeated(a, shape.open, shape.item, (64 * 1024 - 8) / shape.item.len, "]");
-        const big = try charge(many, shape.syntax, .{});
-        try testing.expectEqual(@as(?anyerror, error.TooLarge), big.refused);
-        try testing.expect(big.spent <= (Limits{}).nfa.raw());
+        // Charged as one property, however many times it is written, up to the longest pattern:
+        // never more than once over. (Not to the byte: whether the arena grows a list in place
+        // depends on what else it holds.)
+        var once: ?usize = null;
+        for ([_]usize{ 1, 400, (64 * 1024 - 8) / shape.item.len }) |count| {
+            const pattern = try repeated(a, shape.open, shape.item, count, "]");
+            const c = try charge(pattern, shape.syntax, .{});
+            try testing.expectEqual(null, c.refused);
+            const named = letters * @sizeOf([2]u21);
+            try testing.expect(c.spent <= per_byte * (named + c.out));
+            if (once) |first| try testing.expect(c.spent <= first + first / 4) else once = c.spent;
+        }
     }
+    // Spelled apart, the same table is the same set.
+    const spellings = try charge("[\\pL\\p{L}\\p{Letter}\\p{ l }\\p{gc=L}]", .{}, .{});
+    const one = try charge("[\\pL]", .{}, .{});
+    try testing.expect(spellings.spent <= one.spent + one.spent / 4);
 }
 
 test "a property alone, closed under case each time it is written, is charged each time" {
