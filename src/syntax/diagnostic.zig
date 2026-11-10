@@ -72,8 +72,11 @@ pub const Reason = enum {
     /// engine matches half a character; a UTF-8 haystack has no halves.
     unsupported_code_unit_split,
     /// The pattern's classes, or the sets made on the way to them, past `Limits.nfa`: each range
-    /// a class holds is at least one transition of the automaton it becomes.
+    /// a class holds is at least one transition of the automaton it becomes. Or the automaton
+    /// itself past it, a repetition's copies among its states.
     nfa_too_large,
+    /// ECMAScript's lookahead, which the derivative engine runs: refused until that engine is in.
+    unsupported_lookahead,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.
     regexp_flag_invalid,
 };

@@ -27,6 +27,7 @@ const Ast = @import("../syntax/Ast.zig");
 const diagnostic_zig = @import("../syntax/diagnostic.zig");
 const Syntax = @import("../Syntax.zig");
 const Limits = @import("../Limits.zig");
+const Charged = @import("../Charged.zig");
 const Hir = @import("Hir.zig");
 const ranges = @import("ranges.zig");
 const properties = xenoglyph.properties;
@@ -91,51 +92,6 @@ pub fn translateCounted(arena: Allocator, ast: *const Ast, syntax: Syntax, limit
         else => |e| return e,
     };
 }
-
-/// An allocator that takes each allocation's bytes from what is left before it allocates, and
-/// refuses one past it as out of memory, marking `over`. Nothing freed is given back: the
-/// charge bounds the work as well as what is held.
-const Charged = struct {
-    child: Allocator,
-    left: usize,
-    over: bool = false,
-
-    fn allocator(c: *Charged) Allocator {
-        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
-    }
-
-    fn take(c: *Charged, bytes: usize) bool {
-        if (bytes > c.left) {
-            c.over = true;
-            return false;
-        }
-        c.left -= bytes;
-        return true;
-    }
-
-    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
-        const c: *Charged = @ptrCast(@alignCast(ctx));
-        if (!c.take(len)) return null;
-        return c.child.rawAlloc(len, alignment, ret);
-    }
-
-    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
-        const c: *Charged = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len and !c.take(new_len - memory.len)) return false;
-        return c.child.rawResize(memory, alignment, new_len, ret);
-    }
-
-    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
-        const c: *Charged = @ptrCast(@alignCast(ctx));
-        if (new_len > memory.len and !c.take(new_len - memory.len)) return null;
-        return c.child.rawRemap(memory, alignment, new_len, ret);
-    }
-
-    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
-        const c: *Charged = @ptrCast(@alignCast(ctx));
-        c.child.rawFree(memory, alignment, ret);
-    }
-};
 
 const Work = union(enum) {
     visit: Ast.Index,

@@ -2,9 +2,10 @@
 const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
-    .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig" } },
+    .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig", "src/Charged.zig" } },
     .{ .name = "syntax", .patterns = &.{ "src/syntax/Ast.zig", "src/syntax/diagnostic.zig", "src/syntax/parse.zig", "src/syntax/ecma.zig" } },
     .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig" } },
+    .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/compile.zig" } },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
 
@@ -28,6 +29,7 @@ pub const references: []const gantry.rules.ReferenceRule = &package_references;
 pub const required = [_][]const u8{
     "src/Syntax.zig",
     "src/Limits.zig",
+    "src/Charged.zig",
     "src/syntax/Ast.zig",
     "src/syntax/diagnostic.zig",
     "src/syntax/parse.zig",
@@ -36,5 +38,8 @@ pub const required = [_][]const u8{
     "src/hir/Hir.zig",
     "src/hir/translate.zig",
     "src/hir/literals.zig",
+    "src/nfa/utf8.zig",
+    "src/nfa/Nfa.zig",
+    "src/nfa/compile.zig",
     "src/spectra.zig",
 };

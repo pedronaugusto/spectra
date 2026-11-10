@@ -6,4 +6,5 @@ test {
     _ = @import("hir/ranges_test.zig");
     _ = @import("hir/translate_test.zig");
     _ = @import("hir/literals_test.zig");
+    _ = @import("nfa/compile_test.zig");
 }
