@@ -10,4 +10,5 @@ test {
     _ = @import("regex_test.zig");
     _ = @import("regex_suite_test.zig");
     _ = @import("ecma_verdicts_test.zig");
+    _ = @import("testing/ecma.zig");
 }

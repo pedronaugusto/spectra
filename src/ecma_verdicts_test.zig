@@ -6,6 +6,10 @@ const strand = @import("strand");
 const v8_verdicts = @import("v8_verdicts");
 const Regex = @import("Regex.zig");
 const Syntax = @import("Syntax.zig");
+const parse = @import("syntax/parse.zig");
+const translate = @import("hir/translate.zig");
+const Hir = @import("hir/Hir.zig");
+const ecma = @import("testing/ecma.zig");
 const testing = std.testing;
 
 const Case = struct {
@@ -48,6 +52,12 @@ const Tally = struct {
     differ_repetition_groups: usize = 0,
     /// Whether a match exists, outside the code unit cases: always V8's.
     is_match_differ: usize = 0,
+    /// ECMA-262's semantics as written (testing/ecma.zig) against V8: every case agrees but
+    /// the code unit ones, which it reads as code points too.
+    oracle_agree: usize = 0,
+    oracle_code_units: usize = 0,
+    /// Its budget spent: never, at these sizes.
+    oracle_budget: usize = 0,
 };
 
 fn codeUnits(case: Case) bool {
@@ -64,7 +74,7 @@ fn quantifiedGroup(pattern: []const u8) bool {
     return false;
 }
 
-fn spansEql(groups: []const ?Regex.Span, want: []const ?[2]usize) bool {
+fn spansEql(groups: anytype, want: []const ?[2]usize) bool {
     if (groups.len != want.len) return false;
     for (groups, want) |g, w| {
         if ((g == null) != (w == null)) return false;
@@ -80,7 +90,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
     const file = try strand.json.parseLeaky(File, a, v8_verdicts.bytes, .{});
     var tally: Tally = .{};
     // Cases of one pattern and flags come together: each is compiled once.
-    var held: ?struct { case: Case, re: Regex, cache: Regex.Cache } = null;
+    var held: ?struct { case: Case, re: Regex, cache: Regex.Cache, hir: Hir } = null;
     defer if (held) |*h| {
         h.cache.deinit(testing.allocator);
         h.re.deinit();
@@ -103,13 +113,30 @@ test "V8's verdicts, through the ECMAScript dialect" {
                 return error.TestUnexpectedResult;
             };
             errdefer re.deinit();
-            held = .{ .case = case, .re = re, .cache = try re.cache(testing.allocator) };
+            const ast = try a.create(@import("syntax/Ast.zig"));
+            ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
+            const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
+            held = .{ .case = case, .re = re, .cache = try re.cache(testing.allocator), .hir = hir };
         }
         const re = &held.?.re;
         const cache = &held.?.cache;
         const groups = try a.alloc(?Regex.Span, re.captureCount());
         const found = re.captures(cache, .of(case.haystack), groups);
         const units = codeUnits(case);
+        if (ecma.exec(a, &held.?.hir, case.haystack, 1_000_000)) |said| {
+            const same = if (said) |g| case.match != null and spansEql(g, case.match.?) else case.match == null;
+            if (same) {
+                tally.oracle_agree += 1;
+            } else if (units) {
+                tally.oracle_code_units += 1;
+            } else {
+                std.debug.print("oracle: /{s}/{s} on {any}: {any}, V8 {any}\n", .{ case.pattern, case.flags, case.haystack, said, case.match });
+                return error.TestUnexpectedResult;
+            }
+        } else |err| switch (err) {
+            error.Budget => tally.oracle_budget += 1,
+            else => return err,
+        }
         if (!units and found != (case.match != null)) tally.is_match_differ += 1;
         const same_span = if (case.match) |w| found and groups[0].?.start == w[0].?[0] and groups[0].?.end == w[0].?[1] else !found;
         if (same_span and (case.match == null or spansEql(groups, case.match.?))) {
@@ -134,5 +161,8 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .differ_repetition_span = 38,
         .differ_repetition_groups = 159,
         .is_match_differ = 0,
+        .oracle_agree = 9422,
+        .oracle_code_units = 3,
+        .oracle_budget = 0,
     }, tally);
 }
