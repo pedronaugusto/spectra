@@ -4,7 +4,7 @@ const gantry = @import("gantry");
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig" } },
     .{ .name = "syntax", .patterns = &.{ "src/syntax/Ast.zig", "src/syntax/diagnostic.zig", "src/syntax/parse.zig", "src/syntax/ecma.zig" } },
-    .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig" } },
+    .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig" } },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
 
@@ -35,5 +35,6 @@ pub const required = [_][]const u8{
     "src/hir/ranges.zig",
     "src/hir/Hir.zig",
     "src/hir/translate.zig",
+    "src/hir/literals.zig",
     "src/spectra.zig",
 };
