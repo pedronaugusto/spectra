@@ -8,10 +8,11 @@ binary. What isn't regular (backreferences, lookbehind) is refused by name at co
 
 ## Status
 
-Under construction, in stages, each landed whole: the Rust dialect's parser and the ECMAScript dialect with its
-validity check (both in), the HIR with Unicode classes, the Thompson NFA, the PikeVM with its linear bound tested, the lazy
-and reverse DFAs with the meta engine, the prefilters, lookahead by derivatives, then sets, dense DFAs and the build
-step. Nothing is released until every stage is in.
+Under construction, in stages, each landed whole. In: the Rust dialect's parser and the ECMAScript dialect with its
+validity check, the HIR with Unicode classes, the Thompson NFA, and the PikeVM with its linear bound tested under the
+public `Regex` (is-match, find, captures, every match in turn), checked against regex's own test suite and V8's
+verdicts. To come: the lazy and reverse DFAs with the meta engine, the prefilters, lookahead by derivatives, then
+sets, dense DFAs and the build step. Nothing is released until every stage is in.
 
 ## License
 

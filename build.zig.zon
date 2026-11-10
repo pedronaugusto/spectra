@@ -23,5 +23,9 @@
             .url = "git+https://github.com/pedronaugusto/preflight?ref=v0.18.6#fc92e4525de9c2097b7671c58d1b7dceeb382c7c",
             .hash = "preflight-0.18.6-LX1Zwk0oFADjhxvFxsjPZipvvjxVgVuq3Z9jfPwQvaqw",
         },
+        .strand = .{
+            .url = "git+https://github.com/pedronaugusto/strand#ea21420bd71a8e813735daeda0325663c5194afa",
+            .hash = "strand-0.15.0-8LNWVuvCMQCYG_OnFmBVn3nAOvBz8gQVHBkDhg7Yf7w0",
+        },
     },
 }

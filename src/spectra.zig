@@ -1,6 +1,8 @@
 //! spectra: regular expressions in linear time. See README.md and docs/design.md.
 pub const Syntax = @import("Syntax.zig");
 pub const Limits = @import("Limits.zig");
+/// A compiled pattern and its searches.
+pub const Regex = @import("Regex.zig");
 pub const syntax = struct {
     pub const Ast = @import("syntax/Ast.zig");
     pub const parse = @import("syntax/parse.zig").parse;
@@ -16,4 +18,5 @@ pub const ecmascript = struct {
 test {
     _ = syntax;
     _ = ecmascript;
+    _ = Regex;
 }

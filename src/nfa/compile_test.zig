@@ -12,6 +12,7 @@ const translate_mod = @import("../hir/translate.zig");
 const Nfa = @import("Nfa.zig");
 const compile_mod = @import("compile.zig");
 const utf8 = @import("utf8.zig");
+const backtrack = @import("../testing/backtrack.zig");
 const testing = std.testing;
 
 const ecma: Syntax = .{ .dialect = .ecmascript };
@@ -199,97 +200,13 @@ test "a group's number and name, and the looks the automaton asks" {
     try testing.expectEqual(@as(usize, 1), c.nfa.looks.count());
 }
 
-// A bounded backtracker over the automaton: alternatives in order, each (state, position)
-// explored once, so its first match is the leftmost-first one with its captures. The search
-// engines are tested against the same cases when they land; this reads the automaton alone.
-
-const Job = union(enum) {
-    explore: struct { id: Nfa.StateId, at: usize },
-    restore: struct { slot: u32, value: ?usize },
-};
-
-fn lookHolds(look: Nfa.Look, haystack: []const u8, at: usize) bool {
-    return switch (look) {
-        .start_text => at == 0,
-        .end_text => at == haystack.len,
-        .start_line_lf => at == 0 or haystack[at - 1] == '\n',
-        .end_line_lf => at == haystack.len or haystack[at] == '\n',
-        else => std.debug.panic("the test reads no {t}", .{look}),
-    };
+/// The leftmost-first match and its groups' spans, read by the test backtracker.
+fn search(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, slots: []?usize) !bool {
+    return try backtrack.search(gpa, nfa, haystack, .{ .start = 0, .end = haystack.len }, false, slots) != null;
 }
 
 fn step(nfa: *const Nfa, s: Nfa.State, byte: u8) ?Nfa.StateId {
-    switch (s) {
-        .byte_range => |t| return if (t.contains(byte)) t.next else null,
-        .sparse => |slice| {
-            for (nfa.transitionsOf(slice)) |t| if (t.contains(byte)) return t.next;
-            return null;
-        },
-        else => return null,
-    }
-}
-
-fn backtrackAt(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, start: usize, slots: []?usize) !bool {
-    const width = haystack.len + 1;
-    var visited = try std.DynamicBitSetUnmanaged.initEmpty(gpa, nfa.states.len * width);
-    defer visited.deinit(gpa);
-    var jobs: std.ArrayList(Job) = .empty;
-    defer jobs.deinit(gpa);
-    @memset(slots, null);
-    try jobs.append(gpa, .{ .explore = .{ .id = nfa.start_anchored, .at = start } });
-    while (jobs.pop()) |job| switch (job) {
-        .restore => |back| slots[back.slot] = back.value,
-        .explore => |e| {
-            var id = e.id;
-            var at = e.at;
-            while (true) {
-                const bit = id.raw() * width + at;
-                if (visited.isSet(bit)) break;
-                visited.set(bit);
-                switch (nfa.state(id)) {
-                    .byte_range, .sparse => {
-                        if (at == haystack.len) break;
-                        id = step(nfa, nfa.state(id), haystack[at]) orelse break;
-                        at += 1;
-                    },
-                    .look => |l| {
-                        if (!lookHolds(l.look, haystack, at)) break;
-                        id = l.next;
-                    },
-                    .binary => |b| {
-                        try jobs.append(gpa, .{ .explore = .{ .id = b.second, .at = at } });
-                        id = b.first;
-                    },
-                    .alternation => |slice| {
-                        const alts = nfa.alternativesOf(slice);
-                        var k = alts.len;
-                        while (k > 1) {
-                            k -= 1;
-                            try jobs.append(gpa, .{ .explore = .{ .id = alts[k], .at = at } });
-                        }
-                        id = alts[0];
-                    },
-                    .capture => |cap| {
-                        try jobs.append(gpa, .{ .restore = .{ .slot = cap.slot, .value = slots[cap.slot] } });
-                        slots[cap.slot] = at;
-                        id = cap.next;
-                    },
-                    .fail => break,
-                    .match => return true,
-                }
-            }
-        },
-    };
-    return false;
-}
-
-/// The leftmost-first match and its groups' spans, null where a group took no part.
-fn search(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, slots: []?usize) !bool {
-    for (0..haystack.len + 1) |start| {
-        if (try backtrackAt(gpa, nfa, haystack, start, slots)) return true;
-        if (nfa.start_unanchored == nfa.start_anchored) return false;
-    }
-    return false;
+    return backtrack.step(nfa, s, byte);
 }
 
 const Case = struct {
@@ -641,13 +558,6 @@ fn anyCompile(_: void, case: *shakedown.Case) !void {
     defer nfa.deinit(case.gpa);
     try expectWellFormed(&nfa);
 
-    var plain = true;
-    var it = nfa.looks.iterator();
-    while (it.next()) |look| switch (look) {
-        .start_text, .end_text, .start_line_lf, .end_line_lf => {},
-        else => plain = false,
-    };
-    if (!plain) return;
     const slots = try case.gpa.alloc(?usize, nfa.slots());
     var haystack: [8]u8 = undefined;
     const len = shakedown.gen.intRange(s, usize, 0, haystack.len);

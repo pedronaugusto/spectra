@@ -5,7 +5,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig", "src/Charged.zig" } },
     .{ .name = "syntax", .patterns = &.{ "src/syntax/Ast.zig", "src/syntax/diagnostic.zig", "src/syntax/parse.zig", "src/syntax/ecma.zig" } },
     .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig" } },
-    .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/compile.zig" } },
+    .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/look.zig", "src/nfa/compile.zig" } },
+    .{ .name = "engines", .patterns = &.{"src/pikevm.zig"} },
+    .{ .name = "meta", .patterns = &.{"src/Regex.zig"} },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
 
@@ -17,7 +19,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
     .{
         .name = "named dependencies",
         .unresolved_only = true,
-        .except_targets = &.{ "std", "aegis", "xenoglyph", "shakedown", "builtin" },
+        .except_targets = &.{ "std", "aegis", "xenoglyph", "shakedown", "strand", "regex_suite", "v8_verdicts", "builtin" },
     },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
@@ -40,6 +42,9 @@ pub const required = [_][]const u8{
     "src/hir/literals.zig",
     "src/nfa/utf8.zig",
     "src/nfa/Nfa.zig",
+    "src/nfa/look.zig",
     "src/nfa/compile.zig",
+    "src/pikevm.zig",
+    "src/Regex.zig",
     "src/spectra.zig",
 };

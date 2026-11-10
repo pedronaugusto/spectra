@@ -35,6 +35,8 @@ name_bytes: []const u8,
 looks: LookSet,
 /// An empty match must not split a code point (`Syntax.utf8`): the search's rule, kept here.
 utf8: bool,
+/// Some match is empty: a search in UTF-8 checks where such a match ends.
+empty_ok: bool,
 
 pub const Transition = struct {
     lo: u8,

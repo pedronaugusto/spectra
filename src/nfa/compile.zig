@@ -77,7 +77,7 @@ const unset = std.math.maxInt(u32);
 
 const Fragment = struct { start: u32, end: u32 };
 
-const Starts = struct { anchored: u32, unanchored: u32 };
+const Starts = struct { anchored: u32, unanchored: u32, empty_ok: bool };
 
 const Trans = struct { lo: u8, hi: u8, next: u32 };
 
@@ -158,12 +158,13 @@ const Compiler = struct {
         c.b.patch(s0, body.start);
         c.b.patch(body.end, e0);
         c.b.patch(e0, m);
-        if (c.props[@backingInt(c.hir.root)].anchored) return .{ .anchored = s0, .unanchored = s0 };
+        const root = c.props[@backingInt(c.hir.root)];
+        if (root.anchored) return .{ .anchored = s0, .unanchored = s0, .empty_ok = root.empty_ok };
         const loop = try c.b.addUnion(2, true);
         const any = try c.b.add(.{ .byte_range = .{ .lo = 0, .hi = 0xff, .next = loop } });
         c.b.patch(loop, any);
         c.b.patch(loop, s0);
-        return .{ .anchored = s0, .unanchored = loop };
+        return .{ .anchored = s0, .unanchored = loop, .empty_ok = root.empty_ok };
     }
 
     fn properties(c: *Compiler) BuildError!void {
@@ -734,6 +735,7 @@ const Builder = struct {
             .name_bytes = name_bytes,
             .looks = looks,
             .utf8 = utf8_mode,
+            .empty_ok = starts.empty_ok,
         };
     }
 };
