@@ -6,6 +6,14 @@
 //! What ECMA-262 means and spectra cannot run is refused by name, `error.Unsupported`:
 //! backreferences, lookbehind, a lookaround inside a lookaround, a property with no data.
 //!
+//! Every set of ranges translation makes, the ones on the way to a class among them (the
+//! characters before they are put in order, a complement, a closure), is charged to
+//! `Limits.nfa` before it is allocated: a class's ranges are a lower bound on the automaton they
+//! become, so a pattern past the limit here is one the build would refuse later (`TooLarge`,
+//! `nfa_too_large`). The work done on sets is bounded by the same charge: each step of a set
+//! operation writes a range it was charged for, and a sort runs over ranges charged. What the
+//! pattern's own shape needs (nodes, stacks) is linear in it, bounded by `Limits.pattern`.
+//!
 //! Without `u` or `v` ECMA-262 reads UTF-16 code units, and the haystack here is UTF-8. A code
 //! point past U+FFFF written whole is matched whole. Half of one named alone (`\uD83D`, or a
 //! quantifier on the second half, `😀+`) has no meaning over UTF-8 and is refused, never left
@@ -18,6 +26,7 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("../syntax/Ast.zig");
 const diagnostic_zig = @import("../syntax/diagnostic.zig");
 const Syntax = @import("../Syntax.zig");
+const Limits = @import("../Limits.zig");
 const Hir = @import("Hir.zig");
 const ranges = @import("ranges.zig");
 const properties = xenoglyph.properties;
@@ -25,7 +34,7 @@ const CodePoints = ranges.CodePoints;
 const Diagnostic = diagnostic_zig.Diagnostic;
 const Reason = diagnostic_zig.Reason;
 
-pub const Error = error{ OutOfMemory, Invalid, Unsupported };
+pub const Error = error{ OutOfMemory, Invalid, Unsupported, TooLarge };
 
 const Dialect = enum { rust, annex_b, unicode, sets };
 
@@ -46,9 +55,18 @@ const Flags = struct {
 };
 
 /// The translation of `ast`, in `arena`, which the `Hir` borrows.
-pub fn translate(arena: Allocator, ast: *const Ast, syntax: Syntax, diagnostic: ?*Diagnostic) Error!Hir {
+pub fn translate(arena: Allocator, ast: *const Ast, syntax: Syntax, limits: Limits, diagnostic: ?*Diagnostic) Error!Hir {
+    var spent: usize = 0;
+    return translateCounted(arena, ast, syntax, limits, diagnostic, &spent);
+}
+
+/// `translate`, and in `spent` the bytes it was charged for, refused or not.
+pub fn translateCounted(arena: Allocator, ast: *const Ast, syntax: Syntax, limits: Limits, diagnostic: ?*Diagnostic, spent: *usize) Error!Hir {
+    var charged: Charged = .{ .child = arena, .left = limits.nfa.raw() };
+    defer spent.* = limits.nfa.raw() - charged.left;
     var t: Translator = .{
         .arena = arena,
+        .sets = charged.allocator(),
         .ast = ast,
         .utf8 = syntax.utf8,
         .diagnostic = diagnostic,
@@ -65,8 +83,59 @@ pub fn translate(arena: Allocator, ast: *const Ast, syntax: Syntax, diagnostic: 
             .crlf = false,
         },
     };
-    return t.run();
+    return t.run() catch |err| switch (err) {
+        error.OutOfMemory => if (charged.over) {
+            if (diagnostic) |d| d.* = .{ .span = ast.node(ast.root).span, .reason = .nfa_too_large };
+            return error.TooLarge;
+        } else return error.OutOfMemory,
+        else => |e| return e,
+    };
 }
+
+/// An allocator that takes each allocation's bytes from what is left before it allocates, and
+/// refuses one past it as out of memory, marking `over`. Nothing freed is given back: the
+/// charge bounds the work as well as what is held.
+const Charged = struct {
+    child: Allocator,
+    left: usize,
+    over: bool = false,
+
+    fn allocator(c: *Charged) Allocator {
+        return .{ .ptr = c, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+
+    fn take(c: *Charged, bytes: usize) bool {
+        if (bytes > c.left) {
+            c.over = true;
+            return false;
+        }
+        c.left -= bytes;
+        return true;
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret: usize) ?[*]u8 {
+        const c: *Charged = @ptrCast(@alignCast(ctx));
+        if (!c.take(len)) return null;
+        return c.child.rawAlloc(len, alignment, ret);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) bool {
+        const c: *Charged = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !c.take(new_len - memory.len)) return false;
+        return c.child.rawResize(memory, alignment, new_len, ret);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret: usize) ?[*]u8 {
+        const c: *Charged = @ptrCast(@alignCast(ctx));
+        if (new_len > memory.len and !c.take(new_len - memory.len)) return null;
+        return c.child.rawRemap(memory, alignment, new_len, ret);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret: usize) void {
+        const c: *Charged = @ptrCast(@alignCast(ctx));
+        c.child.rawFree(memory, alignment, ret);
+    }
+};
 
 const Work = union(enum) {
     visit: Ast.Index,
@@ -82,7 +151,8 @@ const Work = union(enum) {
 /// A class being evaluated: its code points, and under `v` its strings of other than one.
 const Value = struct {
     set: CodePoints = .{},
-    /// UTF-32 of each string, as bytes.
+    /// Each string's code points as `u32`s, as bytes: a `u21` in memory has bits past its own,
+    /// which nothing defines, so it is no key.
     strings: std.StringHashMapUnmanaged(void) = .empty,
 };
 
@@ -98,6 +168,8 @@ const ClassFrame = struct {
     items: []const Ast.ClassItem,
     at: usize = 0,
     value: Value = .{},
+    /// Its characters and ranges, in the order written: put in order once, when it ends.
+    leaves: std.ArrayList([2]u21) = .empty,
     done: Done,
 };
 
@@ -106,7 +178,11 @@ const Capture = struct { index: u32, name: ?[]const u8 };
 const surrogates: [2]u21 = .{ 0xd800, 0xdfff };
 
 const Translator = struct {
+    /// What the pattern's own shape needs, nodes and stacks: linear in it, bounded by
+    /// `Limits.pattern`.
     arena: Allocator,
+    /// Every set of ranges, on the way to a class or in one: charged to `Limits.nfa`.
+    sets: Allocator,
     ast: *const Ast,
     utf8: bool,
     diagnostic: ?*Diagnostic,
@@ -253,14 +329,16 @@ const Translator = struct {
             .assertion => |a| try results.append(t.arena, try t.add(.{ .look = t.look(a) })),
             .perl => |p| {
                 var value: Value = .{};
-                try t.perl(&value, p);
-                if (t.dialect != .rust) try t.close(&value.set);
+                try t.perl(&value, p, n.span);
+                // Rust's Perl classes are closed as they are; `v` closed a complement before it.
+                if (t.dialect != .rust and !(p.negated and t.dialect == .sets)) try t.close(&value.set);
                 try results.append(t.arena, try t.emit(&value, n.span));
             },
             .unicode => |u| {
                 var value: Value = .{};
                 try t.unicode(&value, u, n.span);
-                if (t.dialect != .rust) try t.close(&value.set);
+                // Alone, what was named closes here; Rust and `v` closed a complement before it.
+                if (!u.negated or t.dialect == .unicode) try t.close(&value.set);
                 try results.append(t.arena, try t.emit(&value, n.span));
             },
             .bracketed => |b| {
@@ -347,10 +425,9 @@ const Translator = struct {
         if (!t.flags.case_insensitive) return t.encoded(cp);
         if (!t.codePoints() and cp > 0x7f) return t.encoded(cp);
         var value: Value = .{};
-        try value.set.add(t.arena, .{ cp, cp });
-        try value.set.closeUnderCase(t.arena, t.folding());
-        if (value.set.count() == 1) return t.encoded(cp);
-        return t.add(.{ .unicode_class = value.set.items() });
+        try value.set.add(t.sets, .{ cp, cp });
+        try value.set.closeUnderCase(t.sets, t.folding());
+        return t.setNode(&value.set, span);
     }
 
     fn byte(t: *Translator, b: u8, span: Ast.Span) Error!Hir.Index {
@@ -368,15 +445,15 @@ const Translator = struct {
                 .rust => if (t.flags.crlf) &.{ .{ '\n', '\n' }, .{ '\r', '\r' } } else &.{.{ '\n', '\n' }},
                 else => &.{ .{ '\n', '\n' }, .{ '\r', '\r' }, .{ 0x2028, 0x2029 } },
             };
-            var out = try CodePoints.fromRanges(t.arena, excepted);
-            if (!t.codePoints()) try intersectBytes(t.arena, &out);
-            try s.subtract(t.arena, &out);
+            var out = try CodePoints.fromRanges(t.sets, excepted);
+            if (!t.codePoints()) try intersectBytes(t.sets, &out);
+            try s.subtract(t.sets, &out);
         }
         return t.emit(&value, span);
     }
 
     fn addFull(t: *Translator, s: *CodePoints) Error!void {
-        try s.add(t.arena, .{ 0, if (t.codePoints()) 0x10ffff else 0xff });
+        try s.add(t.sets, .{ 0, if (t.codePoints()) 0x10ffff else 0xff });
     }
 
     fn look(t: *const Translator, a: Ast.Assertion) Hir.Look {
@@ -407,48 +484,59 @@ const Translator = struct {
     }
 
     fn close(t: *Translator, s: *CodePoints) Error!void {
-        if (t.flags.case_insensitive) try s.closeUnderCase(t.arena, t.folding());
+        if (t.flags.case_insensitive) try s.closeUnderCase(t.sets, t.folding());
     }
 
     fn negate(t: *Translator, s: *CodePoints) Error!void {
-        try s.negate(t.arena);
-        if (!t.codePoints()) try intersectBytes(t.arena, s);
+        try s.negate(t.sets);
+        if (!t.codePoints()) try intersectBytes(t.sets, s);
     }
 
-    fn perl(t: *Translator, value: *Value, p: Ast.Perl) Error!void {
+    /// regex-syntax's verdict on a class of bytes matching UTF-8: refused where it is made,
+    /// whatever takes its complement later, if it takes a byte past ASCII. Made means each
+    /// `\xNN`, each Perl or ASCII class after its own complement, and each bracket after its own.
+    fn bytesFit(t: *Translator, s: *const CodePoints, span: Ast.Span) Error!void {
+        if (t.codePoints() or !t.utf8) return;
+        const items = s.items();
+        if (items.len != 0 and items[items.len - 1][1] > 0x7f) return t.fail(span, .invalid_utf8_class);
+    }
+
+    fn perl(t: *Translator, value: *Value, p: Ast.Perl, span: Ast.Span) Error!void {
         var set: CodePoints = .{};
         if (t.dialect != .rust) {
             switch (p.class) {
-                .digit => try addAll(t.arena, &set, &.{.{ '0', '9' }}),
+                .digit => try addAll(t.sets, &set, &.{.{ '0', '9' }}),
                 .space => {
-                    try addAll(t.arena, &set, &.{ .{ 9, 13 }, .{ ' ', ' ' }, .{ 0xa0, 0xa0 }, .{ 0x2028, 0x2029 }, .{ 0xfeff, 0xfeff } });
-                    try addAll(t.arena, &set, properties.generalCategoryRanges(.space_separator));
+                    try addAll(t.sets, &set, &.{ .{ 9, 13 }, .{ ' ', ' ' }, .{ 0xa0, 0xa0 }, .{ 0x2028, 0x2029 }, .{ 0xfeff, 0xfeff } });
+                    try addAll(t.sets, &set, properties.generalCategoryRanges(.space_separator));
                 },
                 .word => {
-                    try addAll(t.arena, &set, &ascii_word);
-                    if (t.ecmaFoldedWord()) try addAll(t.arena, &set, &.{ .{ 0x17f, 0x17f }, .{ 0x212a, 0x212a } });
+                    try addAll(t.sets, &set, &ascii_word);
+                    if (t.ecmaFoldedWord()) try addAll(t.sets, &set, &.{ .{ 0x17f, 0x17f }, .{ 0x212a, 0x212a } });
                 },
             }
-            if (t.dialect == .sets) try t.close(&set);
+            // `v` closes before the complement; what is not negated closes with its class.
+            if (t.dialect == .sets and p.negated) try t.close(&set);
         } else if (t.flags.unicode) {
             switch (p.class) {
-                .digit => try addAll(t.arena, &set, properties.generalCategoryRanges(.decimal_number)),
-                .space => try addAll(t.arena, &set, properties.whiteSpaceRanges()),
+                .digit => try addAll(t.sets, &set, properties.generalCategoryRanges(.decimal_number)),
+                .space => try addAll(t.sets, &set, properties.whiteSpaceRanges()),
                 .word => {
-                    try addAll(t.arena, &set, properties.binaryRanges(.alphabetic));
-                    try addAll(t.arena, &set, properties.generalCategoryGroupRanges(.mark));
-                    try addAll(t.arena, &set, properties.generalCategoryRanges(.decimal_number));
-                    try addAll(t.arena, &set, properties.generalCategoryRanges(.connector_punctuation));
-                    try addAll(t.arena, &set, properties.binaryRanges(.join_control));
+                    try addAll(t.sets, &set, properties.binaryRanges(.alphabetic));
+                    try addAll(t.sets, &set, properties.generalCategoryGroupRanges(.mark));
+                    try addAll(t.sets, &set, properties.generalCategoryRanges(.decimal_number));
+                    try addAll(t.sets, &set, properties.generalCategoryRanges(.connector_punctuation));
+                    try addAll(t.sets, &set, properties.binaryRanges(.join_control));
                 },
             }
         } else switch (p.class) {
-            .digit => try addAll(t.arena, &set, &.{.{ '0', '9' }}),
-            .space => try addAll(t.arena, &set, &.{ .{ 9, 13 }, .{ ' ', ' ' } }),
-            .word => try addAll(t.arena, &set, &ascii_word),
+            .digit => try addAll(t.sets, &set, &.{.{ '0', '9' }}),
+            .space => try addAll(t.sets, &set, &.{ .{ 9, 13 }, .{ ' ', ' ' } }),
+            .word => try addAll(t.sets, &set, &ascii_word),
         }
         if (p.negated) try t.negate(&set);
-        try value.set.unionWith(t.arena, &set);
+        try t.bytesFit(&set, span);
+        try value.set.unionWith(t.sets, &set);
     }
 
     fn unicode(t: *Translator, value: *Value, u: Ast.Unicode, span: Ast.Span) Error!void {
@@ -456,10 +544,13 @@ const Translator = struct {
         var set: CodePoints = .{};
         if (t.dialect == .rust) try t.rustProperty(&set, u, span) else try t.ecmaProperty(&set, u, span);
         // Rust and `v` fold what is named and take its complement; `u` complements first, and
-        // the class closes after.
-        if (t.dialect == .rust or t.dialect == .sets) try t.close(&set);
-        if (u.negated) try t.negate(&set);
-        try value.set.unionWith(t.arena, &set);
+        // the class closes after. What is not negated closes with its class, or alone where it
+        // stands: closing a union is the union of the closings.
+        if (u.negated) {
+            if (t.dialect == .rust or t.dialect == .sets) try t.close(&set);
+            try t.negate(&set);
+        }
+        try value.set.unionWith(t.sets, &set);
     }
 
     /// regex-syntax's order: `name=value`; alone, a binary property, a general category (with
@@ -471,18 +562,19 @@ const Translator = struct {
                 return t.fail(span, .unicode_property_unknown);
             };
             switch (property) {
-                .general_category => if (!try t.category(set, v, .loose)) return t.fail(span, .unicode_property_unknown),
-                .script => try addAll(t.arena, set, properties.scriptRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
-                .script_extensions => try addAll(t.arena, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
+                // regex-syntax reads Any, ASCII and Assigned as values of General_Category too.
+                .general_category => if (!try t.special(set, v, .loose) and !try t.category(set, v, .loose)) return t.fail(span, .unicode_property_unknown),
+                .script => try addAll(t.sets, set, properties.scriptRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
+                .script_extensions => try addAll(t.sets, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .loose) orelse return t.fail(span, .unicode_property_unknown))),
                 .binary => return t.fail(span, .unicode_property_unknown),
             }
             return;
         }
-        if (properties.binaryNamed(u.name, .loose)) |b| return addAll(t.arena, set, properties.binaryRanges(b));
+        if (properties.binaryNamed(u.name, .loose)) |b| return addAll(t.sets, set, properties.binaryRanges(b));
         if (try t.special(set, u.name, .loose)) return;
         if (try t.category(set, u.name, .loose)) return;
         const script = properties.scriptNamed(u.name, .loose) orelse return t.fail(span, .unicode_property_unknown);
-        try addAll(t.arena, set, properties.scriptExtensionRanges(script));
+        try addAll(t.sets, set, properties.scriptExtensionRanges(script));
     }
 
     /// The parser has held the name to ECMA-262's tables: what is left is finding it.
@@ -491,97 +583,89 @@ const Translator = struct {
             const property = properties.propertyNamed(u.name, .exact) orelse aegis.assert.never("the parser held the property to ECMA-262's table");
             switch (property) {
                 .general_category => _ = try t.category(set, v, .exact),
-                .script => try addAll(t.arena, set, properties.scriptRanges(properties.scriptNamed(v, .exact).?)),
-                .script_extensions => try addAll(t.arena, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .exact).?)),
+                .script => try addAll(t.sets, set, properties.scriptRanges(properties.scriptNamed(v, .exact).?)),
+                .script_extensions => try addAll(t.sets, set, properties.scriptExtensionRanges(properties.scriptNamed(v, .exact).?)),
                 .binary => aegis.assert.never("the parser held `name=value` to the three properties that take a value"),
             }
             return;
         }
         if (try t.special(set, u.name, .exact)) return;
         if (try t.category(set, u.name, .exact)) return;
-        if (properties.binaryNamed(u.name, .exact)) |b| return addAll(t.arena, set, properties.binaryRanges(b));
+        if (properties.binaryNamed(u.name, .exact)) |b| return addAll(t.sets, set, properties.binaryRanges(b));
         // A property of strings: no sequences are tabulated here.
         return t.unsupported(span, .unsupported_unicode_property);
     }
 
     fn special(t: *Translator, set: *CodePoints, name: []const u8, match: properties.NameMatch) Error!bool {
         if (nameIs(name, "Any", match)) {
-            try set.add(t.arena, .{ 0, 0x10ffff });
+            try set.add(t.sets, .{ 0, 0x10ffff });
         } else if (nameIs(name, "ASCII", match)) {
-            try set.add(t.arena, .{ 0, 0x7f });
+            try set.add(t.sets, .{ 0, 0x7f });
         } else if (nameIs(name, "Assigned", match)) {
-            try addAll(t.arena, set, properties.generalCategoryRanges(.unassigned));
-            try set.negate(t.arena);
+            try addAll(t.sets, set, properties.generalCategoryRanges(.unassigned));
+            try set.negate(t.sets);
         } else return false;
         return true;
     }
 
     fn category(t: *Translator, set: *CodePoints, name: []const u8, match: properties.NameMatch) Error!bool {
         switch (properties.generalCategoryNamed(name, match) orelse return false) {
-            .category => |c| try addAll(t.arena, set, properties.generalCategoryRanges(c)),
-            .group => |g| try addAll(t.arena, set, properties.generalCategoryGroupRanges(g)),
+            .category => |c| try addAll(t.sets, set, properties.generalCategoryRanges(c)),
+            .group => |g| try addAll(t.sets, set, properties.generalCategoryGroupRanges(g)),
         }
         return true;
     }
 
-    fn asciiClass(t: *Translator, value: *Value, a: Ast.Ascii) Error!void {
+    fn asciiClass(t: *Translator, value: *Value, a: Ast.Ascii, span: Ast.Span) Error!void {
         var set: CodePoints = .{};
-        try addAll(t.arena, &set, asciiRanges(a.class));
-        try t.close(&set);
-        if (a.negated) try t.negate(&set);
-        try value.set.unionWith(t.arena, &set);
+        try addAll(t.sets, &set, asciiRanges(a.class));
+        if (a.negated) {
+            try t.close(&set);
+            try t.negate(&set);
+        }
+        try t.bytesFit(&set, span);
+        try value.set.unionWith(t.sets, &set);
     }
 
     fn scalarItem(t: *Translator, cp: u21, hex: bool, span: Ast.Span) Error!u21 {
         if (t.dialect == .annex_b and cp >= surrogates[0] and cp <= surrogates[1]) return t.unsupported(span, .unsupported_code_unit_split);
         if (t.codePoints() or cp <= 0x7f) return cp;
-        if (hex) return cp;
-        return t.fail(span, .unicode_not_allowed);
+        if (!hex) return t.fail(span, .unicode_not_allowed);
+        // A byte past ASCII matches no UTF-8 alone, whatever the class does with it after.
+        if (t.utf8) return t.fail(span, .invalid_utf8_class);
+        return cp;
     }
 
-    fn item(t: *Translator, value: *Value, it: Ast.ClassItem, span: Ast.Span) Error!void {
+    fn item(t: *Translator, frame: *ClassFrame, it: Ast.ClassItem, span: Ast.Span) Error!void {
         switch (it) {
             .literal => |cp| {
                 const c = try t.scalarItem(cp, false, span);
-                try t.addLeaf(value, .{ c, c });
+                try frame.leaves.append(t.sets, .{ c, c });
             },
             .byte => |b| {
                 const c = try t.scalarItem(b, true, span);
-                try t.addLeaf(value, .{ c, c });
+                try frame.leaves.append(t.sets, .{ c, c });
             },
-            .range => |r| try t.addLeaf(value, .{ try t.scalarItem(r[0], false, span), try t.scalarItem(r[1], false, span) }),
-            .hex_range => |r| try t.addLeaf(value, .{ try t.scalarItem(r.ends[0], r.hex[0], span), try t.scalarItem(r.ends[1], r.hex[1], span) }),
-            .perl => |p| try t.perl(value, p),
-            .unicode => |u| try t.unicode(value, u, span),
-            .ascii => |a| try t.asciiClass(value, a),
-            .strings => |s| try t.strings(value, s),
+            .range => |r| try frame.leaves.append(t.sets, .{ try t.scalarItem(r[0], false, span), try t.scalarItem(r[1], false, span) }),
+            .hex_range => |r| try frame.leaves.append(t.sets, .{ try t.scalarItem(r.ends[0], r.hex[0], span), try t.scalarItem(r.ends[1], r.hex[1], span) }),
+            .perl => |p| try t.perl(&frame.value, p, span),
+            .unicode => |u| try t.unicode(&frame.value, u, span),
+            .ascii => |a| try t.asciiClass(&frame.value, a, span),
+            .strings => |s| try t.strings(frame, s),
             .nested, .operation => aegis.assert.never("the class walk opens nested classes and operations"),
         }
     }
 
-    /// A range or character. Under `v` with `i` each closes as it is added: its operations
-    /// are between sets already folded.
-    fn addLeaf(t: *Translator, value: *Value, range: [2]u21) Error!void {
-        if (t.dialect == .sets and t.flags.case_insensitive) {
-            var set: CodePoints = .{};
-            try set.add(t.arena, range);
-            try t.close(&set);
-            try value.set.unionWith(t.arena, &set);
-        } else try value.set.add(t.arena, range);
-    }
-
-    fn strings(t: *Translator, value: *Value, slice_of: Ast.Slice) Error!void {
+    fn strings(t: *Translator, frame: *ClassFrame, slice_of: Ast.Slice) Error!void {
         for (t.ast.stringsOf(slice_of)) |s| {
             const original = t.ast.codePointsOf(s);
             if (original.len == 1) {
-                try t.addLeaf(value, .{ original[0], original[0] });
+                try frame.leaves.append(t.sets, .{ original[0], original[0] });
                 continue;
             }
-            const folded = try t.arena.dupe(u21, original);
-            if (t.flags.case_insensitive) for (folded) |*cp| {
-                cp.* = xenoglyph.case.simpleFold(cp.*);
-            };
-            try value.strings.put(t.arena, std.mem.sliceAsBytes(folded), {});
+            const key = try t.arena.alloc(u32, original.len);
+            for (key, original) |*out, cp| out.* = if (t.flags.case_insensitive) xenoglyph.case.simpleFold(cp) else cp;
+            try frame.value.strings.put(t.arena, std.mem.sliceAsBytes(key), {});
         }
     }
 
@@ -597,23 +681,29 @@ const Translator = struct {
                 switch (it) {
                     .nested => |n| try stack.append(t.arena, .{ .items = t.ast.itemsOf(n.items), .done = .{ .nested = n.negated } }),
                     .operation => |o| try stack.append(t.arena, .{ .items = t.ast.itemsOf(o.lhs), .done = .{ .lhs = o } }),
-                    else => try t.item(&frame.value, it, span),
+                    else => try t.item(frame, it, span),
                 }
                 continue;
             }
             var value = frame.value;
+            // Each frame closes what it holds when it ends (Rust's operands and brackets, ECMA's
+            // classes), so its characters and ranges close with it, not one by one.
+            var leaves: CodePoints = .fromList(frame.leaves);
+            try value.set.unionWith(t.sets, &leaves);
             const done = frame.done;
             _ = stack.pop();
             switch (done) {
                 .root => {
                     try t.close(&value.set);
                     if (b.negated) try t.negate(&value.set);
+                    try t.bytesFit(&value.set, span);
                     return value;
                 },
                 .nested => |negated| {
                     try t.close(&value.set);
                     if (negated) try t.negate(&value.set);
-                    try merge(t.arena, &stack.items[stack.items.len - 1].value, &value);
+                    try t.bytesFit(&value.set, span);
+                    try t.merge(&stack.items[stack.items.len - 1].value, &value);
                 },
                 .lhs => |o| {
                     try t.close(&value.set);
@@ -622,8 +712,8 @@ const Translator = struct {
                 .rhs => |r| {
                     try t.close(&value.set);
                     var left = r.lhs;
-                    try combine(t.arena, &left, &value, r.op);
-                    try merge(t.arena, &stack.items[stack.items.len - 1].value, &left);
+                    try t.combine(&left, &value, r.op);
+                    try t.merge(&stack.items[stack.items.len - 1].value, &left);
                 },
             }
         }
@@ -642,8 +732,8 @@ const Translator = struct {
                 empty_string = true;
                 continue;
             }
-            const copy = try t.arena.alloc(u21, key.len / @sizeOf(u21));
-            @memcpy(std.mem.sliceAsBytes(copy), key.*);
+            const copy = try t.arena.alloc(u21, key.len / @sizeOf(u32));
+            for (copy, 0..) |*cp, i| cp.* = @intCast(std.mem.readInt(u32, key.*[i * @sizeOf(u32) ..][0..@sizeOf(u32)], .native));
             try list.append(t.arena, copy);
         }
         std.mem.sort([]const u21, list.items, {}, longerFirst);
@@ -669,9 +759,31 @@ const Translator = struct {
         }
         if (t.utf8 and items.len != 0 and items[items.len - 1][1] > 0x7f) return t.fail(span, .invalid_utf8_class);
         if (items.len == 1 and items[0][0] == items[0][1]) return t.add(.{ .literal = try t.arena.dupe(u8, &.{@intCast(items[0][0])}) });
-        const bytes = try t.arena.alloc([2]u8, items.len);
+        const bytes = try t.sets.alloc([2]u8, items.len);
         for (bytes, items) |*out, r| out.* = .{ @intCast(r[0]), @intCast(r[1]) };
         return t.add(.{ .byte_class = bytes });
+    }
+
+    fn merge(t: *Translator, into: *Value, from: *const Value) Error!void {
+        try into.set.unionWith(t.sets, &from.set);
+        var it = from.strings.keyIterator();
+        while (it.next()) |key| try into.strings.put(t.arena, key.*, {});
+    }
+
+    /// `left` op `right`, into `left`.
+    fn combine(t: *Translator, left: *Value, right: *Value, op: @FieldType(Ast.Operation, "op")) Error!void {
+        switch (op) {
+            .intersection => try left.set.intersect(t.sets, &right.set),
+            .difference => try left.set.subtract(t.sets, &right.set),
+            .symmetric_difference => try left.set.symmetricDifference(t.sets, &right.set),
+        }
+        var doomed: std.ArrayList([]const u8) = .empty;
+        var it = left.strings.keyIterator();
+        while (it.next()) |key| {
+            const in_right = right.strings.contains(key.*);
+            if ((op == .intersection and !in_right) or (op == .difference and in_right)) try doomed.append(t.arena, key.*);
+        }
+        for (doomed.items) |key| _ = left.strings.remove(key);
     }
 };
 
@@ -706,28 +818,6 @@ fn intersectBytes(arena: Allocator, set: *CodePoints) Allocator.Error!void {
     try set.intersect(arena, &bytes);
 }
 
-fn merge(arena: Allocator, into: *Value, from: *const Value) Allocator.Error!void {
-    try into.set.unionWith(arena, &from.set);
-    var it = from.strings.keyIterator();
-    while (it.next()) |key| try into.strings.put(arena, key.*, {});
-}
-
-/// `left` op `right`, into `left`.
-fn combine(arena: Allocator, left: *Value, right: *Value, op: @FieldType(Ast.Operation, "op")) Allocator.Error!void {
-    switch (op) {
-        .intersection => try left.set.intersect(arena, &right.set),
-        .difference => try left.set.subtract(arena, &right.set),
-        .symmetric_difference => try left.set.symmetricDifference(arena, &right.set),
-    }
-    var doomed: std.ArrayList([]const u8) = .empty;
-    var it = left.strings.keyIterator();
-    while (it.next()) |key| {
-        const in_right = right.strings.contains(key.*);
-        if ((op == .intersection and !in_right) or (op == .difference and in_right)) try doomed.append(arena, key.*);
-    }
-    for (doomed.items) |key| _ = left.strings.remove(key);
-}
-
 fn longerFirst(_: void, a: []const u21, b: []const u21) bool {
     if (a.len != b.len) return a.len > b.len;
     return std.mem.order(u21, a, b) == .lt;
@@ -756,11 +846,14 @@ fn nameIs(name: []const u8, wanted: []const u8, match: properties.NameMatch) boo
     };
 }
 
-/// `name` equal to `wanted` ignoring case, spaces, hyphens and underscores.
+/// `name` equal to `wanted` as regex-syntax compares names: a leading `is` in any case
+/// dropped, then spaces, hyphens, underscores and what is not ASCII, case ignored. (Its one
+/// exception, `isc`, names none of the words compared here.)
 fn looseIs(name: []const u8, wanted: []const u8) bool {
+    const prefixed = name.len >= 2 and std.ascii.eqlIgnoreCase(name[0..2], "is");
     var i: usize = 0;
-    for (name) |c| {
-        if (c == ' ' or c == '_' or c == '-') continue;
+    for (name[if (prefixed) 2 else 0..]) |c| {
+        if (c == ' ' or c == '_' or c == '-' or c > 0x7f) continue;
         if (i == wanted.len or std.ascii.toLower(c) != std.ascii.toLower(wanted[i])) return false;
         i += 1;
     }

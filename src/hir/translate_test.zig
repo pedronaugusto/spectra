@@ -6,6 +6,8 @@ const parse_mod = @import("../syntax/parse.zig");
 const Syntax = @import("../Syntax.zig");
 const Hir = @import("Hir.zig");
 const translate_mod = @import("translate.zig");
+const xenoglyph = @import("xenoglyph");
+const Limits = @import("../Limits.zig");
 const testing = std.testing;
 
 const ecma: Syntax = .{ .dialect = .ecmascript };
@@ -32,7 +34,7 @@ fn hirOf(a: std.mem.Allocator, pattern: []const u8, syntax: Syntax, d: ?*parse_m
     const ast = try parse_mod.parse(a, .init(pattern), syntax, .{}, d);
     const held = try a.create(Ast);
     held.* = ast;
-    return translate_mod.translate(a, held, syntax, d);
+    return translate_mod.translate(a, held, syntax, .{}, d);
 }
 
 fn text(a: std.mem.Allocator, pattern: []const u8, syntax: Syntax) ![]const u8 {
@@ -137,7 +139,7 @@ test "Rust: flags apply to the rest of their group, literals join, repetitions s
     try expectText("abc", .{}, "\"abc\"");
     try expectText("(?:ab)c", .{}, "\"abc\"");
     try expectText("(?i)k", .{}, "[4b-4b 6b-6b 212a-212a]");
-    try expectText("(?-u)(?i)k", .{}, "[4b-4b 6b-6b]");
+    try expectText("(?-u)(?i)k", .{}, "b[4b-4b 6b-6b]");
     try expectText("(?i)1a(?-i)b", .{}, "<\"1\" [41-41 61-61] \"b\">");
     try expectText("(?:(?i)a)b", .{}, "<[41-41 61-61] \"b\">");
     try expectText("(?i)a|b", .{}, "[41-41 61-61]|[42-42 62-62]");
@@ -186,6 +188,15 @@ test "Rust: classes, Unicode's and ASCII's, and bytes" {
     try expectText("(?-u)[\\xE0-\\xFF]", .{ .utf8 = false }, "b[e0-ff]");
     try expectRefused("(?-u)[\u{e9}]", .{}, error.Invalid, .unicode_not_allowed);
     try expectRefused("(?-u)\\pL", .{}, error.Invalid, .unicode_not_allowed);
+    // regex-syntax refuses, matching UTF-8, a class of bytes past ASCII where it is made: each
+    // `\xNN`, each Perl or ASCII class and each bracket after its own complement.
+    try expectRefused("(?-u)[^\\x80-\\xFF]", .{}, error.Invalid, .invalid_utf8_class);
+    try expectText("(?-u)[^\\x80-\\xFF]", .{ .utf8 = false }, "b[0-7f]");
+    try expectRefused("(?-u)[^\\W]", .{}, error.Invalid, .invalid_utf8_class);
+    try expectRefused("(?-u)[^[^a]]", .{}, error.Invalid, .invalid_utf8_class);
+    try expectRefused("(?-u)[^[:^alpha:]]", .{}, error.Invalid, .invalid_utf8_class);
+    try expectText("(?-u)[^[:^alpha:]]", .{ .utf8 = false }, "b[41-5a 61-7a]");
+    try expectText("(?-u)[\\x41-\\x43]", .{}, "b[41-43]");
     try testing.expect(try takes("\\d", .{}, 0x660));
     try testing.expect(try takes("\\s", .{}, 0x2028));
     try testing.expect(try takes("\\w", .{}, 0x300));
@@ -218,6 +229,16 @@ test "Rust: Unicode names compare loosely, a script alone is its extensions, and
     try expectRefused("\\p{Script}", .{}, error.Invalid, .unicode_property_unknown);
     try expectRefused("\\p{age=3.0}", .{}, error.Unsupported, .unsupported_unicode_property);
     try expectRefused("\\p{wb=Numeric}", .{}, error.Unsupported, .unsupported_unicode_property);
+    // Any, ASCII and Assigned are General_Category's values too, and a leading `is` is dropped
+    // from every name, as regex-syntax reads them.
+    try testing.expect(try takes("\\p{gc=Any}", .{}, 0x10ffff));
+    try testing.expect(try takes("\\p{gc=ASCII}", .{}, 'a'));
+    try testing.expect(!try takes("\\p{general_category=assigned}", .{}, 0x378));
+    try testing.expect(try takes("\\p{IsAny}", .{}, 0x10ffff));
+    try testing.expect(try takes("\\p{is_ascii}", .{}, 'a'));
+    try testing.expect(!try takes("\\p{isAssigned}", .{}, 0x378));
+    try expectRefused("\\p{isage=3.0}", .{}, error.Unsupported, .unsupported_unicode_property);
+    try expectRefused("\\p{gc=Klingon}", .{}, error.Invalid, .unicode_property_unknown);
 }
 
 test "ECMAScript: the classes and the assertions are ECMA-262's, in each mode" {
@@ -335,7 +356,7 @@ test "chains as long as the pattern are walked, not recursed" {
     try pattern.append(a, 'a');
     for (0..1000) |_| try pattern.append(a, ')');
     const ast = try parse_mod.parse(a, .init(pattern.items), .{}, .{ .nesting = .literal(1024) }, null);
-    _ = try translate_mod.translate(a, &ast, .{}, null);
+    _ = try translate_mod.translate(a, &ast, .{}, .{}, null);
 }
 
 const alphabet = "ab()[]{}|*+?^$.\\-&~:<>=!,019dDsSwWpPbBkqxuLniU_ ";
@@ -357,8 +378,8 @@ fn anyTranslation(_: void, case: *shakedown.Case) !void {
         error.OutOfMemory => return err,
     };
     d = .{};
-    const hir = translate_mod.translate(a, &ast, syntax, &d) catch |err| switch (err) {
-        error.Invalid, error.Unsupported => {
+    const hir = translate_mod.translate(a, &ast, syntax, .{}, &d) catch |err| switch (err) {
+        error.Invalid, error.Unsupported, error.TooLarge => {
             try testing.expect(d.reason != .none);
             return;
         },
@@ -378,4 +399,106 @@ fn anyTranslation(_: void, case: *shakedown.Case) !void {
 
 test "fuzz: any pattern that parses translates or is refused by name" {
     try shakedown.check(testing.allocator, {}, anyTranslation, .{ .cases = 5000, .seed = 0x41b5 });
+}
+
+/// The HIR's own bytes: its nodes, its children, and what its literals and classes hold.
+fn hirBytes(hir: *const Hir) usize {
+    var n: usize = hir.nodes.len * @sizeOf(Hir.Node) + hir.children.len * @sizeOf(Hir.Index);
+    for (hir.nodes) |node| switch (node) {
+        .literal => |b| n += b.len,
+        .unicode_class => |r| n += r.len * @sizeOf([2]u21),
+        .byte_class => |r| n += r.len * @sizeOf([2]u8),
+        else => {},
+    };
+    return n;
+}
+
+const Charge = struct { spent: usize, out: usize, refused: ?anyerror };
+
+/// What translating `pattern` was charged, and the bytes of the HIR it made (0 if refused).
+fn charge(pattern: []const u8, syntax: Syntax, limits: Limits) !Charge {
+    var s: State = .{};
+    defer s.deinit();
+    const a = s.arena();
+    const ast = try parse_mod.parse(a, .init(pattern), syntax, .{}, null);
+    var spent: usize = 0;
+    var d: parse_mod.Diagnostic = .{};
+    const hir = translate_mod.translateCounted(a, &ast, syntax, limits, &d, &spent) catch |err| {
+        if (err == error.TooLarge) try testing.expectEqual(.nfa_too_large, d.reason);
+        return .{ .spent = spent, .out = 0, .refused = err };
+    };
+    return .{ .spent = spent, .out = hirBytes(&hir), .refused = null };
+}
+
+/// A pattern of `count` copies of `item` inside `open` and `close`.
+fn repeated(a: std.mem.Allocator, open: []const u8, item: []const u8, count: usize, close: []const u8) ![]const u8 {
+    var p: std.ArrayList(u8) = .empty;
+    try p.appendSlice(a, open);
+    for (0..count) |_| try p.appendSlice(a, item);
+    try p.appendSlice(a, close);
+    return p.items;
+}
+
+// Work, counted as the bytes translation is charged: each set operation writes what it reads
+// into a charged list, and a sort runs over a charged one. The bound is linear in what the
+// pattern names (its bytes, and the ranges of each property it names) and what the HIR holds.
+const per_byte = 32;
+
+test "a class of many characters costs what it names and holds, in any order" {
+    var s: State = .{};
+    defer s.deinit();
+    var p: std.ArrayList(u8) = .empty;
+    try p.append(s.arena(), '[');
+    // Apart and descending: each before every one already read.
+    var cp: u21 = 0x20000 + 2 * 15_000;
+    while (cp > 0x20000) : (cp -= 2) {
+        var b: [4]u8 = undefined;
+        try p.appendSlice(s.arena(), b[0..try std.unicode.utf8Encode(cp, &b)]);
+    }
+    try p.append(s.arena(), ']');
+    const c = try charge(p.items, .{}, .{});
+    try testing.expectEqual(null, c.refused);
+    try testing.expect(c.spent <= per_byte * (p.items.len + c.out));
+}
+
+test "a class naming one property many times costs what it names, and past the limit is refused" {
+    var s: State = .{};
+    defer s.deinit();
+    const a = s.arena();
+    const letters = xenoglyph.properties.generalCategoryGroupRanges(.letter).len;
+    for ([_]struct { open: []const u8, item: []const u8, syntax: Syntax }{
+        .{ .open = "[", .item = "\\p{L}", .syntax = with(sets, true) },
+        .{ .open = "(?i)[", .item = "\\pL", .syntax = .{} },
+        .{ .open = "[", .item = "\\P{L}", .syntax = with(ecma, true) },
+    }) |shape| {
+        const few = try repeated(a, shape.open, shape.item, 100, "]");
+        const c = try charge(few, shape.syntax, .{});
+        try testing.expectEqual(null, c.refused);
+        const named = few.len + 100 * letters * @sizeOf([2]u21);
+        try testing.expect(c.spent <= per_byte * (named + c.out));
+        // The pattern at its longest: past the limit, refused for what it was charged so far.
+        const many = try repeated(a, shape.open, shape.item, (64 * 1024 - 8) / shape.item.len, "]");
+        const big = try charge(many, shape.syntax, .{});
+        try testing.expectEqual(@as(?anyerror, error.TooLarge), big.refused);
+        try testing.expect(big.spent <= (Limits{}).nfa.raw());
+    }
+}
+
+test "a property alone, closed under case each time it is written, is charged each time" {
+    var s: State = .{};
+    defer s.deinit();
+    const a = s.arena();
+    const many = try repeated(a, "(?i)", "\\pL", (64 * 1024 - 8) / 3, "");
+    const big = try charge(many, .{}, .{});
+    try testing.expectEqual(@as(?anyerror, error.TooLarge), big.refused);
+    try testing.expect(big.spent <= (Limits{}).nfa.raw());
+    const c = try charge(try repeated(a, "(?i)", "\\pL", 10, ""), .{}, .{});
+    try testing.expectEqual(null, c.refused);
+    try testing.expect(c.spent <= per_byte * (40 + c.out));
+}
+
+test "a limit smaller than a class refuses it" {
+    const c = try charge("\\p{L}", ecma, .{ .nfa = .literal("1KiB") });
+    try testing.expectEqual(@as(?anyerror, error.TooLarge), c.refused);
+    try testing.expect(c.spent <= 1024);
 }

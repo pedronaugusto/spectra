@@ -71,6 +71,9 @@ pub const Reason = enum {
     /// ECMAScript without `u` or `v`: half of a code point past U+FFFF named alone. A UTF-16
     /// engine matches half a character; a UTF-8 haystack has no halves.
     unsupported_code_unit_split,
+    /// The pattern's classes, or the sets made on the way to them, past `Limits.nfa`: each range
+    /// a class holds is at least one transition of the automaton it becomes.
+    nfa_too_large,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.
     regexp_flag_invalid,
 };

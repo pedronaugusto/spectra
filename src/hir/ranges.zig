@@ -1,6 +1,7 @@
 //! Sets of code points or of bytes, as sorted ranges, none touching another: what a class
-//! becomes. Every operation leaves the set in that form, and runs in time linear in the ranges
-//! it reads (closing under case, in the orbits its ranges hold).
+//! becomes. Every operation leaves the set in that form. The set operations run in time linear
+//! in the ranges they read, and closing under case in the orbits its ranges hold; `fromRanges`
+//! and `add`, which take ranges in any order, sort them.
 //!
 //! A code point set spans U+0000 to U+10FFFF, surrogates included: the ECMAScript dialect can
 //! name one. A set is held to scalar values where it is compiled to UTF-8.
@@ -53,6 +54,14 @@ pub fn Set(comptime T: type, comptime max: T) type {
             return s;
         }
 
+        /// The set of the ranges in `list`, which it takes over: in any order, overlapping or
+        /// not, each `first <= last`.
+        pub fn fromList(list: std.ArrayList(Range)) Self {
+            var s: Self = .{ .ranges = list };
+            s.canonicalize();
+            return s;
+        }
+
         pub fn items(s: *const Self) []const Range {
             return s.ranges.items;
         }
@@ -80,7 +89,12 @@ pub fn Set(comptime T: type, comptime max: T) type {
         }
 
         pub fn eql(s: *const Self, other: *const Self) bool {
-            return std.mem.eql(u8, std.mem.sliceAsBytes(s.ranges.items), std.mem.sliceAsBytes(other.ranges.items));
+            if (s.ranges.items.len != other.ranges.items.len) return false;
+            // Value by value: a `u21` in memory has bits past its own, which nothing defines.
+            for (s.ranges.items, other.ranges.items) |a, b| {
+                if (a[0] != b[0] or a[1] != b[1]) return false;
+            }
+            return true;
         }
 
         /// Adds `range`, then puts the set back in order.
@@ -113,10 +127,31 @@ pub fn Set(comptime T: type, comptime max: T) type {
             s.ranges.shrinkRetainingCapacity(out + 1);
         }
 
-        /// Every value of `s` or `other`.
+        /// Every value of `s` or `other`: the two in order, merged.
         pub fn unionWith(s: *Self, gpa: Allocator, other: *const Self) Allocator.Error!void {
-            try s.ranges.appendSlice(gpa, other.ranges.items);
-            s.canonicalize();
+            if (other.ranges.items.len == 0) return;
+            var out: std.ArrayList(Range) = try .initCapacity(gpa, s.ranges.items.len + other.ranges.items.len);
+            errdefer out.deinit(gpa);
+            const a = s.ranges.items;
+            const b = other.ranges.items;
+            var i: usize = 0;
+            var j: usize = 0;
+            while (i < a.len or j < b.len) {
+                const next = if (j == b.len or (i < a.len and a[i][0] <= b[j][0])) blk: {
+                    i += 1;
+                    break :blk a[i - 1];
+                } else blk: {
+                    j += 1;
+                    break :blk b[j - 1];
+                };
+                const written = out.items;
+                // Overlapping or touching the last: one range.
+                if (written.len != 0 and @as(u32, next[0]) <= @as(u32, written[written.len - 1][1]) + 1) {
+                    written[written.len - 1][1] = @max(written[written.len - 1][1], next[1]);
+                } else out.appendAssumeCapacity(next);
+            }
+            s.ranges.deinit(gpa);
+            s.ranges = out;
         }
 
         /// Every value of both.
