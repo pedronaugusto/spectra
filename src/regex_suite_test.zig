@@ -9,6 +9,7 @@
 const std = @import("std");
 const strand = @import("strand");
 const regex_suite = @import("regex_suite");
+const nfa_dump = @import("testing/nfa_dump.zig");
 const Regex = @import("Regex.zig");
 const Syntax = @import("Syntax.zig");
 const testing = std.testing;
@@ -30,6 +31,10 @@ const Tally = struct {
     skipped_search_kind: usize = 0,
     skipped_match_kind: usize = 0,
     skipped_line_terminator: usize = 0,
+    /// Every compiled pattern's automaton, written out (testing/nfa_dump.zig) and hashed in
+    /// order with its pattern: the Rust dialect's automata, pinned, so a change made for another
+    /// dialect that moves one byte of them shows.
+    automata: u64 = 0,
 };
 
 fn field(test_value: Value, key: []const u8) ?Value {
@@ -145,6 +150,8 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
         return;
     };
     defer re.deinit();
+    tally.automata = std.hash.Wyhash.hash(tally.automata, pattern);
+    tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
     if (!flag(t, "compiles", true)) {
         std.debug.print("{s}/{s}: /{s}/ compiled, regex refuses it\n", .{ file, name, pattern });
         tally.failed += 1;
@@ -222,5 +229,6 @@ test "regex's own test suite, through the Rust dialect" {
         .skipped_search_kind = 50,
         .skipped_match_kind = 4,
         .skipped_line_terminator = 11,
+        .automata = 3201477359050160620,
     }, tally);
 }
