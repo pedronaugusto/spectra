@@ -78,6 +78,29 @@ test "every match in turn: an empty match right after another is passed over, an
     try expectAll("(?Rm)^", .{}, "a\r\nb\rc", &.{ .{ 0, 0 }, .{ 3, 3 }, .{ 5, 5 } });
 }
 
+fn expectGroups(pattern: []const u8, syntax: Syntax, haystack: []const u8, want: []const ?Regex.Span) !void {
+    var re = try compiled(pattern, syntax);
+    defer re.deinit();
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    const got = try gpa.alloc(?Regex.Span, re.captureCount());
+    defer gpa.free(got);
+    try testing.expect(re.captures(&cache, .of(haystack), got));
+    errdefer std.debug.print("/{s}/ on \"{s}\": {any}\n", .{ pattern, haystack, got });
+    try testing.expectEqualSlices(?Regex.Span, want, got);
+}
+
+test "an ECMAScript iteration starts with its atom's captures cleared; Rust's keep the last" {
+    const ab: Regex.Span = .{ .start = 0, .end = 2 };
+    try expectGroups("(?:(a)|b)+", ecma, "ab", &.{ ab, null });
+    try expectGroups("(?:(a)|b)+", .{}, "ab", &.{ ab, .{ .start = 0, .end = 1 } });
+    try expectGroups("(?:(a)|(b))+", ecma, "ab", &.{ ab, null, .{ .start = 1, .end = 2 } });
+    try expectGroups("((a)|b)*", ecma, "ab", &.{ ab, .{ .start = 1, .end = 2 }, null });
+    // One iteration only: nothing to clear, and the group stays.
+    try expectGroups("(?:(a)|b)?b", ecma, "ab", &.{ ab, .{ .start = 0, .end = 1 } });
+    try expectGroups("(?:(a)|b){2}", ecma, "ab", &.{ ab, null });
+}
+
 test "a refused pattern says where and why" {
     var d: Regex.Diagnostic = .{};
     try testing.expectError(error.Invalid, Regex.compile(gpa, .init("a(b"), .{ .diagnostic = &d }));

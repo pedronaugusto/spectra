@@ -63,6 +63,9 @@ pub const State = union(enum) {
     alternation: Slice,
     /// Writes the search's position into `slot`, then `next`.
     capture: struct { group: u32, slot: u32, next: StateId },
+    /// Empties slots `first` to `end`, then `next`: ECMA-262's iteration, which starts with the
+    /// captures of every group in its atom cleared.
+    clear: struct { first: u32, end: u32, next: StateId },
     /// Matches nothing: an empty class.
     fail,
     match,

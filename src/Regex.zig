@@ -41,7 +41,12 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     ast.* = try parse_mod.parse(a, pattern, options.syntax, options.limits, options.diagnostic);
     const hir = try translate_mod.translate(a, ast, options.syntax, options.limits, options.diagnostic);
     const whole = ast.node(ast.root).span;
-    const nfa = try compile_mod.compile(gpa, &hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole }, options.diagnostic);
+    const nfa = try compile_mod.compile(gpa, &hir, .{
+        .limits = options.limits,
+        .utf8 = options.syntax.utf8,
+        .span = whole,
+        .ecma = options.syntax.dialect == .ecmascript,
+    }, options.diagnostic);
     return .{ .gpa = gpa, .nfa = nfa };
 }
 

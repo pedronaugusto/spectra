@@ -38,7 +38,7 @@ fn compiled(pattern: []const u8, syntax: Syntax) !Compiled {
     var c: Compiled = .{ .arena_state = .init(testing.allocator), .hir = undefined, .nfa = undefined };
     errdefer c.arena_state.deinit();
     c.hir = try hirOf(c.arena_state.allocator(), pattern, syntax);
-    c.nfa = try compile_mod.compile(testing.allocator, &c.hir, .{ .utf8 = syntax.utf8 }, null);
+    c.nfa = try compile_mod.compile(testing.allocator, &c.hir, .{ .utf8 = syntax.utf8, .ecma = syntax.dialect == .ecmascript }, null);
     return c;
 }
 
@@ -66,6 +66,7 @@ fn dump(a: std.mem.Allocator, nfa: *const Nfa) ![]const u8 {
                 try w.writeAll(")");
             },
             .capture => |cap| try w.print("slot({d}) => {d}", .{ cap.slot, cap.next.raw() }),
+            .clear => |cl| try w.print("clear({d}..{d}) => {d}", .{ cl.first, cl.end, cl.next.raw() }),
             .fail => try w.writeAll("fail"),
             .match => try w.writeAll("match"),
         }
@@ -548,7 +549,7 @@ fn anyCompile(_: void, case: *shakedown.Case) !void {
         error.OutOfMemory => return err,
     };
     var d: parse_mod.Diagnostic = .{};
-    var nfa = compile_mod.compile(case.gpa, &hir, .{ .utf8 = syntax.utf8 }, &d) catch |err| switch (err) {
+    var nfa = compile_mod.compile(case.gpa, &hir, .{ .utf8 = syntax.utf8, .ecma = syntax.dialect == .ecmascript }, &d) catch |err| switch (err) {
         error.Unsupported, error.TooLarge => {
             try testing.expect(d.reason != .none);
             return;
@@ -589,6 +590,7 @@ fn expectWellFormed(nfa: *const Nfa) !void {
             for (nfa.alternativesOf(slice)) |alt| try testing.expect(alt.raw() < n);
         },
         .capture => |cap| try testing.expect(cap.slot < nfa.slots() and cap.slot / 2 == cap.group and cap.next.raw() < n),
+        .clear => |cl| try testing.expect(cl.first < cl.end and cl.end <= nfa.slots() and cl.first % 2 == 0 and cl.end % 2 == 0 and cl.next.raw() < n),
         .fail => {},
         .match => matches += 1,
     };

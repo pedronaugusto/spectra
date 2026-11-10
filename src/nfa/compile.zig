@@ -15,6 +15,10 @@
 //! pattern's own shape needs (a stack, a property per node) is linear in the HIR. The automaton
 //! is charged apart from the sets translation made; both are bounded by the same limit.
 //!
+//! In ECMAScript (`Options.ecma`) each iteration of a quantified atom that holds groups starts
+//! by clearing their captures, as ECMA-262's RepeatMatcher does: a `clear` state heads each
+//! time the atom may be taken more than once.
+//!
 //! ECMAScript's lookahead runs on the derivative engine, not on this automaton; until that is
 //! built a pattern holding one is refused (`Unsupported`, `unsupported_lookahead`).
 const std = @import("std");
@@ -38,6 +42,8 @@ pub const Options = struct {
     utf8: bool = true,
     /// Where a refusal points. The HIR keeps no spans: the pattern's whole span.
     span: Ast.Span = .{ .start = 0, .end = 0 },
+    /// ECMA-262's iterations: each clears the captures of the groups in its atom.
+    ecma: bool = false,
 };
 
 /// The automaton of `hir`, owned by the caller (`Nfa.deinit`).
@@ -53,7 +59,7 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     const limit = options.limits.nfa.raw();
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir };
+    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .ecma = options.ecma };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
@@ -96,6 +102,7 @@ const BState = union(enum) {
     look: struct { look: Hir.Look, next: u32 },
     alternation: Union,
     capture: struct { group: u32, slot: u32, next: u32 },
+    clear: struct { first: u32, end: u32, next: u32 },
     fail,
     match,
 };
@@ -108,7 +115,15 @@ const Prop = struct {
     only_empty: bool,
     /// Every match begins at the haystack's start.
     anchored: bool,
+    /// The lowest and highest group it holds: a node's groups are numbered in a run.
+    groups: ?[2]u32 = null,
 };
+
+fn joinGroups(a: ?[2]u32, b: ?[2]u32) ?[2]u32 {
+    const x = a orelse return b;
+    const y = b orelse return a;
+    return .{ @min(x[0], y[0]), @max(x[1], y[1]) };
+}
 
 const Frame = struct {
     node: Hir.Index,
@@ -118,6 +133,8 @@ const Frame = struct {
     acc: Fragment = .{ .start = unset, .end = unset },
     min: u32 = 0,
     max: ?u32 = null,
+    /// The `clear` heading each time of an ECMAScript repetition, or `unset`.
+    clear: u32 = unset,
 };
 
 const Step = union(enum) { descend: Hir.Index, finished: Fragment };
@@ -142,6 +159,7 @@ const Compiler = struct {
     scratch: Allocator,
     b: Builder,
     hir: *const Hir,
+    ecma: bool,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
@@ -177,15 +195,20 @@ const Compiler = struct {
                 .look => |l| .{ .empty_ok = true, .only_empty = true, .anchored = l == .start_text },
                 .repetition => |r| blk: {
                     const sub = c.prop(r.sub, i);
-                    break :blk .{ .empty_ok = r.min == 0 or sub.empty_ok, .only_empty = sub.only_empty or r.max == 0, .anchored = r.min > 0 and sub.anchored };
+                    break :blk .{ .empty_ok = r.min == 0 or sub.empty_ok, .only_empty = sub.only_empty or r.max == 0, .anchored = r.min > 0 and sub.anchored, .groups = sub.groups };
                 },
-                .capture => |cap| c.prop(cap.sub, i),
+                .capture => |cap| blk: {
+                    var p = c.prop(cap.sub, i);
+                    p.groups = joinGroups(p.groups, .{ cap.index, cap.index });
+                    break :blk p;
+                },
                 .concat => |slice| blk: {
                     var p: Prop = .{ .empty_ok = true, .only_empty = true, .anchored = false };
                     for (c.hir.childrenOf(slice), 0..) |child, k| {
                         const sub = c.prop(child, i);
                         p.empty_ok = p.empty_ok and sub.empty_ok;
                         p.only_empty = p.only_empty and sub.only_empty;
+                        p.groups = joinGroups(p.groups, sub.groups);
                         if (k == 0) p.anchored = sub.anchored;
                     }
                     break :blk p;
@@ -196,6 +219,7 @@ const Compiler = struct {
                         const sub = c.prop(child, i);
                         p.empty_ok = p.empty_ok or sub.empty_ok;
                         p.only_empty = p.only_empty and sub.only_empty;
+                        p.groups = joinGroups(p.groups, sub.groups);
                         p.anchored = p.anchored and sub.anchored;
                     }
                     break :blk p;
@@ -327,7 +351,20 @@ const Compiler = struct {
                 return .{ .finished = f.acc };
             },
             .repetition => |r| {
-                if (got) |template| return .{ .finished = try c.repeat(f.*, r, template) };
+                if (got) |operand| {
+                    // The clear heads the operand, inside what the copies copy.
+                    var template = operand;
+                    if (f.clear != unset) {
+                        c.b.patch(f.clear, operand.start);
+                        template.start = f.clear;
+                    }
+                    return .{ .finished = try c.repeat(f.*, r, template) };
+                }
+                if (c.ecma and (f.max orelse 2) > 1) if (c.props[@backingInt(r.sub)].groups) |g| {
+                    const first = std.math.mul(u32, g[0], 2) catch return error.TooLarge;
+                    const end = std.math.add(u32, std.math.mul(u32, g[1], 2) catch return error.TooLarge, 2) catch return error.TooLarge;
+                    f.clear = try c.b.add(.{ .clear = .{ .first = first, .end = end, .next = unset } });
+                };
                 return .{ .descend = r.sub };
             },
             else => aegis.assert.never("only a node with children has a frame"),
@@ -562,6 +599,7 @@ const Builder = struct {
             .byte_range => |*t| t.next = to,
             .look => |*l| l.next = to,
             .capture => |*cap| cap.next = to,
+            .clear => |*cl| cl.next = to,
             .alternation => |*u| {
                 aegis.assert.invariant(u.filled < u.len, "an alternation is joined to as many states as it holds");
                 const slot = if (u.lazy) u.len - 1 - u.filled else u.filled;
@@ -585,6 +623,7 @@ const Builder = struct {
                 .byte_range => |t| .{ .byte_range = .{ .lo = t.lo, .hi = t.hi, .next = move.id(t.next) } },
                 .look => |l| .{ .look = .{ .look = l.look, .next = move.id(l.next) } },
                 .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = move.id(cap.next) } },
+                .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = move.id(cl.next) } },
                 .sparse => |slice| blk: {
                     try room(b.trans.items.len, slice.len);
                     const start: u32 = @intCast(b.trans.items.len);
@@ -694,6 +733,7 @@ const Builder = struct {
                     break :blk .{ .alternation = .{ .start = start, .len = u.len } };
                 },
                 .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = map.id(cap.next) } },
+                .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = map.id(cl.next) } },
                 .fail => .fail,
                 .match => .match,
             };

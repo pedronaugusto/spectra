@@ -71,6 +71,15 @@ fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span,
                         }
                         id = cap.next;
                     },
+                    .clear => |cl| {
+                        var slot = cl.first;
+                        while (slot < @min(cl.end, slots.len)) : (slot += 1) {
+                            if (slots[slot] == null) continue;
+                            try jobs.append(gpa, .{ .restore = .{ .slot = slot, .value = slots[slot] } });
+                            slots[slot] = null;
+                        }
+                        id = cl.next;
+                    },
                     .fail => break,
                     .match => return pos,
                 }

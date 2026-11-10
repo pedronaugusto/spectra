@@ -122,7 +122,13 @@ pub const Cache = struct {
         errdefer next.deinit(gpa);
         // Within one position each state is entered once, and pushes at most one restore or
         // alternative per state, or its alternatives past the first.
-        const stack = try gpa.alloc(Follow, states + nfa.alternatives.len + 1);
+        // A clear pushes a restore per slot it empties.
+        var cleared: usize = 0;
+        for (nfa.states) |s| switch (s) {
+            .clear => |cl| cleared += cl.end - cl.first,
+            else => {},
+        };
+        const stack = try gpa.alloc(Follow, states + nfa.alternatives.len + cleared + 1);
         errdefer gpa.free(stack);
         const slots = try gpa.alloc(?usize, nfa.slots());
         return .{ .curr = curr, .next = next, .stack = stack, .slots = slots, .states = states };
@@ -267,6 +273,15 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                                 slots[cap.slot] = at;
                             }
                             id = cap.next;
+                        },
+                        .clear => |cl| {
+                            var slot = cl.first;
+                            while (slot < @min(cl.end, stride)) : (slot += 1) {
+                                if (slots[slot] == null) continue;
+                                push(cache, &depth, .{ .restore = .{ .slot = slot, .value = slots[slot] } });
+                                slots[slot] = null;
+                            }
+                            id = cl.next;
                         },
                     }
                 }

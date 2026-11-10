@@ -14,6 +14,11 @@ public `Regex` (is-match, find, captures, every match in turn), checked against 
 verdicts. To come: the lazy and reverse DFAs with the meta engine, the prefilters, lookahead by derivatives, then
 sets, dense DFAs and the build step. Nothing is released until every stage is in.
 
+Known difference from V8, to be closed before any release: in the ECMAScript dialect, where a quantified group can
+match the empty string (`(a*)*`, `(|a)+`, `(a*)?`), ECMA-262 fails an iteration that matched empty and spectra does
+not yet, so `find` and `captures` can differ from V8 there (`(|a)+` on `a` is `0..1` in V8, `0..0` here). Whether a
+pattern matches is the same.
+
 ## License
 
 MIT.

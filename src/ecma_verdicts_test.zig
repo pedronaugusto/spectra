@@ -41,8 +41,9 @@ const Tally = struct {
     /// Without `u` or `v`, over a haystack past U+FFFF: V8 reads UTF-16 code units, spectra a
     /// whole code point (`.`, a negated class).
     differ_code_units: usize = 0,
-    /// A quantified group: ECMA-262 fails an iteration that matched empty and clears a group's
-    /// captures each iteration, where spectra keeps Perl's leftmost-first.
+    /// A quantified group whose iteration can match empty: ECMA-262 fails such an iteration
+    /// (RepeatMatcher's empty check), which spectra does not yet do. Every difference left is
+    /// one: /(a*)*/, /(a*|b)*/, /(|a)+/, /(a*)?/ and patterns holding them.
     differ_repetition_span: usize = 0,
     differ_repetition_groups: usize = 0,
     /// Whether a match exists, outside the code unit cases: always V8's.
@@ -123,15 +124,15 @@ test "V8's verdicts, through the ECMAScript dialect" {
         }
     }
     try testing.expectEqualStrings("v26.10.0", file.node);
-    // Counted, so a change in either direction shows. The repetition differences await main's
-    // ruling on ECMA-262's iteration semantics (empty iterations fail, captures clear).
+    // Counted, so a change in either direction shows. Captures clear per iteration (17 cases
+    // came to agree); the empty check awaits its design.
     try testing.expectEqual(Tally{
         .cases = 9480,
-        .agree = 9203,
+        .agree = 9220,
         .refused_code_unit_split = 55,
         .differ_code_units = 8,
         .differ_repetition_span = 38,
-        .differ_repetition_groups = 176,
+        .differ_repetition_groups = 159,
         .is_match_differ = 0,
     }, tally);
 }
