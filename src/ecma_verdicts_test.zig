@@ -62,6 +62,7 @@ const Tally = struct {
     path_reverse_anchored: usize = 0,
     path_literal: usize = 0,
     path_reverse_suffix: usize = 0,
+    path_reverse_inner: usize = 0,
     no_lazy_dfa: usize = 0,
     /// Each case's match found again by `find`, its start each way (`Regex.Cache.Start`), and
     /// the same span as the captures' group 0.
@@ -160,6 +161,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .reverse_anchored => tally.path_reverse_anchored += 1,
             .literal => tally.path_literal += 1,
             .reverse_suffix => tally.path_reverse_suffix += 1,
+            .reverse_inner => tally.path_reverse_inner += 1,
         }
         const span = re.find(cache, .of(case.haystack));
         if (found != (span != null) or (found and !std.meta.eql(groups[0].?, span.?))) {
@@ -220,11 +222,12 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .oracle_budget = 0,
         // The lazy DFA answers the rest; it quits on a byte past 0x7f where `\b` or `m`'s lines
         // read code points, and the PikeVM answers those.
-        .path_lazy_dfa = 8030,
-        .path_lazy_dfa_fell_back = 137,
+        .path_lazy_dfa = 7736,
+        .path_lazy_dfa_fell_back = 124,
         .path_reverse_anchored = 116,
         .path_literal = 1058,
         .path_reverse_suffix = 84,
+        .path_reverse_inner = 307,
         .no_lazy_dfa = 0,
         // `find` says what the captures' group 0 says on every case; the reverse lazy DFA finds
         // each start where the lazy DFA found the end, through ECMAScript's empty checks forward.

@@ -269,6 +269,10 @@ pub const Cache = struct {
     /// The last search's prefilter: positions it skipped to, and bytes it skipped.
     candidates: usize = 0,
     skipped: usize = 0,
+    /// Where the last forward scan stopped: the position it would have read next, where no
+    /// match could go on or the span ended. A caller that scans forward from one candidate after
+    /// another skips candidates before it, so no byte is scanned twice.
+    stopped: usize = 0,
 
     /// Allocates what `d.bytes()` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, d: *const Dfa) Allocator.Error!Cache {
@@ -465,6 +469,7 @@ fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*co
     var prefilter = if (anchored) null else pre;
     var tries: usize = 0;
     var skipped: usize = 0;
+    defer c.stopped = at;
     while (at < input.span.end) : (at += 1) {
         if (s == dead) return found;
         if (prefilter) |p| if (found == null and c.recs[s].restart) {

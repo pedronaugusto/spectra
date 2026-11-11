@@ -32,6 +32,7 @@ const onepass_mod = @import("onepass.zig");
 const prefilter_mod = @import("prefilter.zig");
 const literals_mod = @import("hir/literals.zig");
 const suffix_mod = @import("hir/suffix.zig");
+const inner_mod = @import("hir/inner.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -57,7 +58,22 @@ prefilter: ?prefilter_mod.Prefilter,
 /// The literal every match ends with and its prefilter, where `Strategy.reverse_suffix` leads.
 suffix: ?Suffix,
 
+/// The literals X's matches start with, where `Strategy.reverse_inner` leads: their prefilter,
+/// and P's reverse automaton and lazy DFA.
+inner: ?Inner,
+
 const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
+
+const Inner = struct {
+    prefilter: prefilter_mod.Prefilter,
+    nfa: Nfa,
+    dfa: lazy.Dfa,
+
+    fn deinit(i: *Inner, gpa: Allocator) void {
+        i.prefilter.deinit(gpa);
+        i.nfa.deinit(gpa);
+    }
+};
 
 const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
@@ -98,22 +114,70 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     errdefer if (one) |*d| d.deinit(gpa);
     const sizes = backtrack.sizes(&nfa, options.limits.backtrack.raw());
     const backtracker: ?backtrack.Sizes = if (sizes.longest() != null) sizes else null;
-    // What each search's cache would hold, refused before any is made.
-    if ((cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null, backtracker) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
-        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
-        return error.TooLarge;
-    }
     const prefixes = try (literals_mod.Extractor{}).extract(a, &hir);
     var prefilter = if (options.prefilter) try prefilter_mod.choose(gpa, &prefixes, options.limits.prefilter.raw()) else null;
     errdefer if (prefilter) |*p| p.deinit(gpa);
     var suffix: ?Suffix = if (options.prefilter and prefilter == null and dfa != null and reverse != null) try suffixOf(gpa, a, &hir, options.limits.prefilter.raw()) else null;
     errdefer if (suffix) |*s| s.prefilter.deinit(gpa);
-    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and prefilter.?.exactLen() != null and literalAlone(&nfa, &prefixes), suffix != null);
+    var strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and prefilter.?.exactLen() != null and literalAlone(&nfa, &prefixes), suffix != null);
     if (strategy != .reverse_suffix) if (suffix) |*s| {
         s.prefilter.deinit(gpa);
         suffix = null;
     };
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix };
+    // Reverse inner where nothing better leads: no prefilter, no suffix, anchored at neither end.
+    var inner: ?Inner = if (options.prefilter and strategy == .core and prefilter == null) try innerOf(gpa, a, &hir, options, whole) else null;
+    errdefer if (inner) |*i| i.deinit(gpa);
+    if (inner != null) strategy = .reverse_inner;
+    // What each search's cache would hold, refused before any is made.
+    if ((cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null, backtracker, if (inner) |*i| &i.dfa else null) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
+        return error.TooLarge;
+    }
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner };
+}
+
+/// The split of `hir`'s top concatenation P·X at the first child after the first whose
+/// matches start with literals a prefilter finds, with P's reverse automaton and its lazy DFA,
+/// where hir/inner.zig proves the split may lead; null otherwise.
+fn innerOf(gpa: Allocator, arena: Allocator, hir: *const Hir, options: Options, whole: Ast.Span) Allocator.Error!?Inner {
+    const kids = inner_mod.topConcat(hir) orelse return null;
+    for (1..kids.len) |at| {
+        const view = inner_mod.rootedAt(hir, kids[at]);
+        var seq = try (literals_mod.Extractor{}).extract(arena, &view);
+        const lits = seq.literals() orelse continue;
+        // Prefixes of X's first part only: the literals start a match of X, not end one.
+        if (seq.list) |*list| for (list.items) |*lit| {
+            lit.exact = false;
+        };
+        var p = try prefilter_mod.choose(gpa, &seq, options.limits.prefilter.raw()) orelse continue;
+        errdefer p.deinit(gpa);
+        if (!try inner_mod.leads(arena, hir, kids, at, lits)) {
+            p.deinit(gpa);
+            return null;
+        }
+        const prefix = try inner_mod.prefix(arena, hir, kids, at);
+        var nfa = compile_mod.compile(gpa, &prefix, .{
+            .limits = options.limits,
+            .utf8 = options.syntax.utf8,
+            .span = whole,
+            .ecma = options.syntax.dialect == .ecmascript,
+            .reverse = true,
+        }, null) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.TooLarge => {
+                p.deinit(gpa);
+                return null;
+            },
+            error.Unsupported => aegis.assert.never("what compiles forward compiles reversed"),
+        };
+        const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .reverse) orelse {
+            nfa.deinit(gpa);
+            p.deinit(gpa);
+            return null;
+        };
+        return .{ .prefilter = p, .nfa = nfa, .dfa = dfa };
+    }
+    return null;
 }
 
 /// The literal every match of `hir` ends with, its longest such, with its prefilter, where
@@ -168,10 +232,10 @@ fn compileReverse(gpa: Allocator, hir: *const Hir, options: Options, whole: Ast.
     return .{ .nfa = nfa, .dfa = dfa };
 }
 
-fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Dfa, backtracker: ?backtrack.Sizes) ?usize {
+fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Dfa, backtracker: ?backtrack.Sizes, inner: ?*const lazy.Dfa) ?usize {
     const pike = pikevm.sizes(nfa).bytes() orelse return null;
     const lazy_bytes = if (dfa) |d| d.bytes() else 0;
-    const reverse_bytes = if (reverse) |d| d.bytes() else 0;
+    const reverse_bytes = (if (reverse) |d| d.bytes() else 0) + (if (inner) |d| d.bytes() else 0);
     const back_bytes = if (backtracker) |b| b.bytes() else 0;
     const dfas = std.math.add(usize, lazy_bytes, reverse_bytes) catch return null;
     return std.math.add(usize, pike, std.math.add(usize, dfas, back_bytes) catch return null) catch null;
@@ -179,7 +243,7 @@ fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Df
 
 /// The bytes a `Cache` of this pattern allocates, every engine's: what `Limits.cache` bounded.
 pub fn cacheBytes(re: *const Regex) usize {
-    return cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker).?;
+    return cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker, if (re.inner) |*i| &i.dfa else null).?;
 }
 
 /// The engines the compiled pattern has. The PikeVM always; the lazy DFA unless its store
@@ -207,6 +271,7 @@ pub fn deinit(re: *Regex) void {
     if (re.onepass) |*d| d.deinit(re.gpa);
     if (re.prefilter) |*p| p.deinit(re.gpa);
     if (re.suffix) |*s| s.prefilter.deinit(re.gpa);
+    if (re.inner) |*i| i.deinit(re.gpa);
     re.* = undefined;
 }
 
@@ -216,6 +281,8 @@ pub const Cache = struct {
     lazy: ?lazy.Cache,
     reverse: ?lazy.Cache,
     back: ?backtrack.Cache,
+    /// P's reverse lazy DFA's store, for `Strategy.reverse_inner`.
+    inner: ?lazy.Cache,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
     last_start: Start = .pikevm,
@@ -239,6 +306,9 @@ pub const Cache = struct {
         /// `Strategy.reverse_suffix`: the suffix's prefilter, the reverse lazy DFA from an
         /// occurrence, and the lazy DFA anchored at the start it found.
         reverse_suffix,
+        /// `Strategy.reverse_inner`: the inner literals' prefilter, P's reverse lazy DFA from
+        /// an occurrence, and the lazy DFA anchored at the start it found.
+        reverse_inner,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -269,6 +339,7 @@ pub const Cache = struct {
         if (c.lazy) |*l| l.deinit(gpa);
         if (c.reverse) |*r| r.deinit(gpa);
         if (c.back) |*b| b.deinit(gpa);
+        if (c.inner) |*i| i.deinit(gpa);
     }
 };
 
@@ -279,7 +350,9 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
     errdefer if (forward) |*f| f.deinit(gpa);
     var reverse: ?lazy.Cache = if (re.reverse) |*r| try lazy.Cache.init(gpa, &r.dfa) else null;
     errdefer if (reverse) |*r| r.deinit(gpa);
-    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = if (re.backtracker) |b| try backtrack.Cache.init(gpa, b) else null };
+    var back: ?backtrack.Cache = if (re.backtracker) |b| try backtrack.Cache.init(gpa, b) else null;
+    errdefer if (back) |*b| b.deinit(gpa);
+    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = if (re.inner) |*i| try lazy.Cache.init(gpa, &i.dfa) else null };
 }
 
 /// What the PikeVM searches: the input cut at the match's end where the lazy DFA found one, null
@@ -347,6 +420,13 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
             return if (found) |span| .{ .span = span } else .none;
         } else |_| {}
     }
+    if (re.strategy == .reverse_inner and !input.anchored) {
+        if (re.reverseInner(c, input)) |found| {
+            c.last = .reverse_inner;
+            c.last_start = .reverse_dfa;
+            return if (found) |span| .{ .span = span } else .none;
+        } else |_| {}
+    }
     if (re.strategy == .reverse_anchored) {
         const r = &re.reverse.?;
         if (strategy_mod.reverseAnchored(&r.nfa, &r.dfa, &c.reverse.?, input)) |found| {
@@ -392,9 +472,38 @@ fn reverseSuffix(re: *const Regex, c: *Cache, input: Input) (lazy.LimitedError)!
     }
 }
 
+/// `Strategy.reverse_inner`'s search: occurrence by occurrence, read back with P's reverse
+/// automaton to where P's earliest match ending there starts, and search forward from there;
+/// the first confirmed is the leftmost-first match (hir/inner.zig says why). No byte is read
+/// back twice (each reverse scan stops at the occurrence before) nor forward twice (an
+/// occurrence before where the last forward scan stopped is `error.Quadratic`). The loop's
+/// structure, with its two limits, follows regex-automata 0.4.18's meta/strategy.rs
+/// `ReverseInner::try_search_full` (MIT OR Apache-2.0; LICENSES/regex-MIT.txt).
+fn reverseInner(re: *const Regex, c: *Cache, input: Input) lazy.LimitedError!?Span {
+    const i = &re.inner.?;
+    var from = input.span.start;
+    var back_limit = input.span.start;
+    var ahead_limit = input.span.start;
+    while (true) {
+        const at = i.prefilter.find(input.haystack, from, input.span.end) orelse return null;
+        if (at < ahead_limit) return error.Quadratic;
+        var back = input;
+        back.span = .{ .start = input.span.start, .end = at };
+        if (try lazy.searchReverseLimited(&i.nfa, &i.dfa, &c.inner.?, back, back_limit)) |start| {
+            var ahead = input;
+            ahead.span = .{ .start = start, .end = input.span.end };
+            ahead.anchored = true;
+            if (try lazy.search(&re.nfa, &re.dfa.?, &c.lazy.?, ahead)) |end| return .{ .start = start, .end = end };
+            ahead_limit = c.lazy.?.stopped;
+        }
+        from = at + 1;
+        back_limit = at;
+    }
+}
+
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
     var input: Input = .of(haystack);
-    if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix) return re.find(c, input) != null;
+    if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix or re.strategy == .reverse_inner) return re.find(c, input) != null;
     input.earliest = true;
     c.pike.visited = 0;
     const cut = re.narrowed(c, input) orelse return false;

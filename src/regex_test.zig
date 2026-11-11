@@ -958,3 +958,66 @@ test "fuzz: the reverse suffix strategy finds what the PikeVM finds, where it le
     errdefer std.debug.print("{any}\n", .{suffixed});
     try testing.expect(suffixed.taken > 500 and suffixed.refused > 500);
 }
+
+// The reverse inner strategy.
+
+test "the reverse inner strategy leads only where the inner literals' order is the matches' order" {
+    const Strategy = @import("strategy.zig").Strategy;
+    for ([_]struct { pattern: []const u8, haystack: []const u8, want: ?Regex.Span, strategy: Strategy }{
+        // \w reads no @: the occurrence cannot lie inside an earlier match's \w+. (With a
+        // literal end, `\w+@\w+\.com`, the reverse suffix strategy leads instead.)
+        .{ .pattern = "\\w+@\\w+", .haystack = "mail me: ann@example or", .want = .{ .start = 9, .end = 20 }, .strategy = .reverse_inner },
+        .{ .pattern = "\\w+@\\w+", .haystack = "a@ @b", .want = null, .strategy = .reverse_inner },
+        // P is one alternation that reads z: nothing proves it, so not taken.
+        .{ .pattern = "(?:[0-9a-q][^x]*z|b)z+", .haystack = "abzz", .want = .{ .start = 0, .end = 4 }, .strategy = .core },
+    }) |case| {
+        var re = try compiled(case.pattern, .{});
+        defer re.deinit();
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
+        try testing.expectEqual(case.strategy, re.strategy);
+        try testing.expectEqual(case.want, re.find(&cache, .of(case.haystack)));
+        if (case.strategy == .reverse_inner and case.want != null) try testing.expectEqual(.reverse_inner, cache.last);
+    }
+}
+
+fn anyInner(_: void, case: *shakedown.Case) !void {
+    const s = case.source;
+    var state: std.heap.ArenaAllocator = .init(case.gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    // P, an inner literal, and what follows: some proofs hold, some do not.
+    const ps = [_][]const u8{ "[0-9a-q]", "[^x]*", "\\w+", "\\s+", "\\d", "[a-z]{2}", "b", "(?:ab|cd)", "x+", "\\s", "(?:a|bz)" };
+    const ls = [_][]const u8{ "@", "zz", "XY", "z", "-" };
+    const xs = [_][]const u8{ "", "\\w+", "\\d*", "[a-z]", "(?:q|zz)" };
+    var out: std.ArrayList(u8) = .empty;
+    for (0..shakedown.gen.intRange(s, usize, 1, 3)) |_| try out.appendSlice(a, ps[shakedown.gen.intRange(s, usize, 0, ps.len - 1)]);
+    try out.appendSlice(a, ls[shakedown.gen.intRange(s, usize, 0, ls.len - 1)]);
+    try out.appendSlice(a, xs[shakedown.gen.intRange(s, usize, 0, xs.len - 1)]);
+    var h: std.ArrayList(u8) = .empty;
+    const bits = [_][]const u8{ "a", "b", "z", "zz", "x", "XY", " ", "1", "q", "cd", "@", "-" };
+    for (0..shakedown.gen.intRange(s, usize, 0, 14)) |_| try h.appendSlice(a, bits[shakedown.gen.intRange(s, usize, 0, bits.len - 1)]);
+    case.note("/{s}/ on {s}", .{ out.items, h.items });
+    var re = Regex.compile(case.gpa, .init(out.items), .{}) catch return;
+    defer re.deinit();
+    var alone = try Regex.compile(case.gpa, .init(out.items), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
+    defer alone.deinit();
+    var cache = try re.cache(case.gpa);
+    defer cache.deinit(case.gpa);
+    var alone_cache = try alone.cache(case.gpa);
+    defer alone_cache.deinit(case.gpa);
+    const lo = shakedown.gen.intRange(s, usize, 0, h.items.len);
+    const input: Regex.Input = .{ .haystack = h.items, .span = .{ .start = lo, .end = h.items.len } };
+    try testing.expectEqual(alone.find(&alone_cache, input), re.find(&cache, input));
+    if (re.strategy == .reverse_inner) inner_reached.taken += 1 else inner_reached.refused += 1;
+}
+
+var inner_reached: struct { taken: usize = 0, refused: usize = 0 } = .{};
+
+test "fuzz: the reverse inner strategy finds what the PikeVM finds, where it leads and where it is refused" {
+    inner_reached = .{};
+    try shakedown.check(gpa, {}, anyInner, .{ .cases = 4000, .seed = 0x1a3e });
+    errdefer std.debug.print("{any}\n", .{inner_reached});
+    try testing.expect(inner_reached.taken > 500 and inner_reached.refused > 500);
+}

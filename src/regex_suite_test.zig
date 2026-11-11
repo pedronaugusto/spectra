@@ -46,6 +46,7 @@ const Tally = struct {
     path_reverse_anchored: usize = 0,
     path_literal: usize = 0,
     path_reverse_suffix: usize = 0,
+    path_reverse_inner: usize = 0,
     /// Searches where the lazy DFA's prefilter skipped ahead.
     prefiltered: usize = 0,
     /// Patterns with a lazy DFA but no reverse one.
@@ -78,6 +79,7 @@ const Tally = struct {
             .reverse_anchored => tally.path_reverse_anchored += 1,
             .literal => tally.path_literal += 1,
             .reverse_suffix => tally.path_reverse_suffix += 1,
+            .reverse_inner => tally.path_reverse_inner += 1,
         }
     }
 };
@@ -320,13 +322,14 @@ test "regex's own test suite, through the Rust dialect" {
         // past 0x7f where a Unicode `\b` reads code points, the PikeVM answering those.
         .no_lazy_dfa = 0,
         .path_pikevm = 4531,
-        .path_lazy_dfa = 4173,
-        .path_lazy_dfa_fell_back = 147,
+        .path_lazy_dfa = 4148,
+        .path_lazy_dfa_fell_back = 145,
         // A pattern whose every match ends at the end is read back from there alone; a literal,
         // by the prefilter alone; elsewhere the prefilter skips ahead for the lazy DFA.
         .path_reverse_anchored = 85,
         .path_literal = 110,
         .path_reverse_suffix = 16,
+        .path_reverse_inner = 27,
         .prefiltered = 112,
         // Each match's start: the reverse lazy DFA's where the lazy DFA found its end, else the
         // PikeVM's (the PikeVM's own run, and the searches the lazy DFA quit).

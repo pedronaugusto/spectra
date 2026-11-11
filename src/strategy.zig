@@ -33,6 +33,14 @@ pub const Strategy = enum {
     /// passes the end of the occurrence before (`error.Quadratic`); there, and on a quit or a
     /// give-up, `core`.
     reverse_suffix,
+    /// The pattern's top concatenation splits as P·X where every match of X starts with one of
+    /// a few literals, and hir/inner.zig proves their occurrences' order leads to the leftmost
+    /// match: the literals' prefilter finds an occurrence, P's reverse lazy DFA reads back from
+    /// it to where P's earliest match ending there starts, and the lazy DFA searches forward
+    /// from there; the first it confirms is the answer. Chosen by `Regex` where nothing above
+    /// is; no byte is read back or forward twice (`error.Quadratic`), and there, and on a quit
+    /// or a give-up, `core`.
+    reverse_inner,
 };
 
 /// The strategy for a pattern of automaton `nfa` with the lazy DFAs it has, and whether its
