@@ -5,7 +5,9 @@
 //! searches, leftmost-longest matching, and a line terminator other than `\n`.
 //!
 //! regex bounds a repetition only by the automaton's size, so the suite compiles with
-//! `Limits.repetition` at its largest. Every test run must agree.
+//! `Limits.repetition` at its largest. Every test run must agree, on every engine path: each is
+//! run with the lazy DFA and again without it (`Limits.lazy_dfa` of nothing), and which path
+//! answered each search is counted.
 const std = @import("std");
 const strand = @import("strand");
 const regex_suite = @import("regex_suite");
@@ -35,7 +37,24 @@ const Tally = struct {
     /// order with its pattern: the Rust dialect's automata, pinned, so a change made for another
     /// dialect that moves one byte of them shows.
     automata: u64 = 0,
+    /// Patterns with no lazy DFA at the default `Limits.lazy_dfa`.
+    no_lazy_dfa: usize = 0,
+    /// Searches answered on each path (`Regex.Cache.Path`).
+    path_pikevm: usize = 0,
+    path_lazy_dfa: usize = 0,
+    path_lazy_dfa_fell_back: usize = 0,
+
+    fn count(tally: *Tally, path: Regex.Cache.Path) void {
+        switch (path) {
+            .pikevm => tally.path_pikevm += 1,
+            .lazy_dfa => tally.path_lazy_dfa += 1,
+            .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
+        }
+    }
 };
+
+/// The engines a run asks for: the default ones, or the PikeVM alone.
+const Engines = enum { default, pikevm };
 
 fn field(test_value: Value, key: []const u8) ?Value {
     return test_value.get(key);
@@ -133,6 +152,15 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
         return;
     };
     tally.run += 1;
+    for ([_]Engines{ .default, .pikevm }) |engines| {
+        if (!try runWith(a, file, name, t, pattern, engines, tally)) return;
+    }
+    tally.passed += 1;
+}
+
+/// Runs a test on one engine path: whether it agreed, the failure counted where not. A pattern
+/// the test expects refused is counted passed and not run again.
+fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, pattern: []const u8, engines: Engines, tally: *Tally) !bool {
     var haystack = text(t, "haystack").?;
     if (flag(t, "unescape", false)) haystack = try unescape(a, haystack);
     const syntax: Syntax = .{
@@ -141,21 +169,29 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
         .case_insensitive = flag(t, "case-insensitive", false),
     };
     var d: Regex.Diagnostic = .{};
-    const limits: @import("Limits.zig") = .{ .repetition = .literal(100_000) };
+    var limits: @import("Limits.zig") = .{ .repetition = .literal(100_000) };
+    if (engines == .pikevm) limits.lazy_dfa = .fromRaw(0);
     var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d }) catch |err| {
         if (flag(t, "compiles", true)) {
             std.debug.print("{s}/{s}: /{s}/ refused: {t} {t}\n", .{ file, name, pattern, err, d.reason });
             tally.failed += 1;
         } else tally.passed += 1;
-        return;
+        return false;
     };
     defer re.deinit();
-    tally.automata = std.hash.Wyhash.hash(tally.automata, pattern);
-    tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
+    if (engines == .default) {
+        tally.automata = std.hash.Wyhash.hash(tally.automata, pattern);
+        tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
+        if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
+    } else if (re.engines().lazy_dfa) {
+        std.debug.print("{s}/{s}: /{s}/ has a lazy DFA in no store\n", .{ file, name, pattern });
+        tally.failed += 1;
+        return false;
+    }
     if (!flag(t, "compiles", true)) {
         std.debug.print("{s}/{s}: /{s}/ compiled, regex refuses it\n", .{ file, name, pattern });
         tally.failed += 1;
-        return;
+        return false;
     }
     var cache = try re.cache(testing.allocator);
     defer cache.deinit(testing.allocator);
@@ -167,41 +203,46 @@ fn runOne(a: std.mem.Allocator, file: []const u8, t: Value, tally: *Tally) !void
 
     // Is-match, over the whole haystack as regex asks it, when the test does not bound it.
     if (input.span.start == 0 and input.span.end == haystack.len and !input.anchored) {
-        if (re.isMatch(&cache, haystack) != (want.matches.len > 0)) {
-            std.debug.print("{s}/{s}: /{s}/ is-match {}\n", .{ file, name, pattern, want.matches.len == 0 });
+        const got = re.isMatch(&cache, haystack);
+        tally.count(cache.last);
+        if (got != (want.matches.len > 0)) {
+            std.debug.print("{s}/{s}: /{s}/ {t}: is-match {}\n", .{ file, name, pattern, engines, want.matches.len == 0 });
             tally.failed += 1;
-            return;
+            return false;
         }
     }
     // Every match, then every match's groups.
     var it = re.findAllIn(&cache, input);
     var k: usize = 0;
     while (k < limit) : (k += 1) {
-        const m = it.next() orelse break;
+        const found = it.next();
+        tally.count(cache.last);
+        const m = found orelse break;
         if (k >= want.matches.len or !std.meta.eql(want.matches[k][0], @as(?Span, m))) {
-            std.debug.print("{s}/{s}: /{s}/ find {d}: {any}, want {any}\n", .{ file, name, pattern, k, m, if (k < want.matches.len) want.matches[k][0] else null });
+            std.debug.print("{s}/{s}: /{s}/ {t}: find {d}: {any}, want {any}\n", .{ file, name, pattern, engines, k, m, if (k < want.matches.len) want.matches[k][0] else null });
             tally.failed += 1;
-            return;
+            return false;
         }
     }
     if (k != @min(limit, want.matches.len)) {
-        std.debug.print("{s}/{s}: /{s}/ find: {d} matches, want {d}\n", .{ file, name, pattern, k, want.matches.len });
+        std.debug.print("{s}/{s}: /{s}/ {t}: find: {d} matches, want {d}\n", .{ file, name, pattern, engines, k, want.matches.len });
         tally.failed += 1;
-        return;
+        return false;
     }
     const groups = try a.alloc(?Span, re.captureCount());
     var caps = re.findAllIn(&cache, input);
     k = 0;
     while (k < limit and caps.nextCaptures(groups)) : (k += 1) {
+        tally.count(cache.last);
         const w = want.matches[k];
         const compared = if (want.groups_given) groups else groups[0..1];
         if (w.len != compared.len or !std.meta.eql(w, compared) and !spansEql(w, compared)) {
-            std.debug.print("{s}/{s}: /{s}/ captures {d}: {any}, want {any}\n", .{ file, name, pattern, k, compared, w });
+            std.debug.print("{s}/{s}: /{s}/ {t}: captures {d}: {any}, want {any}\n", .{ file, name, pattern, engines, k, compared, w });
             tally.failed += 1;
-            return;
+            return false;
         }
     }
-    tally.passed += 1;
+    return true;
 }
 
 fn spansEql(a: []const ?Span, b: []const ?Span) bool {
@@ -230,5 +271,11 @@ test "regex's own test suite, through the Rust dialect" {
         .skipped_match_kind = 4,
         .skipped_line_terminator = 11,
         .automata = 3201477359050160620,
+        // Each search on both paths: the PikeVM alone, and the lazy DFA, which quits on a byte
+        // past 0x7f where a Unicode `\b` reads code points, the PikeVM answering those.
+        .no_lazy_dfa = 0,
+        .path_pikevm = 4531,
+        .path_lazy_dfa = 4382,
+        .path_lazy_dfa_fell_back = 149,
     }, tally);
 }

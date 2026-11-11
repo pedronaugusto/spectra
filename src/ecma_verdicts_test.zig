@@ -11,6 +11,7 @@ const parse = @import("syntax/parse.zig");
 const translate = @import("hir/translate.zig");
 const Hir = @import("hir/Hir.zig");
 const ecma = @import("testing/ecma.zig");
+const grammar = @import("testing/grammar.zig");
 const testing = std.testing;
 
 const Case = struct {
@@ -54,12 +55,22 @@ const Tally = struct {
     oracle_code_units: usize = 0,
     /// Its budget spent: never, at these sizes.
     oracle_budget: usize = 0,
+    /// How each case was answered (`Regex.Cache.Path`); every case is answered again by the
+    /// PikeVM alone, and must say the same.
+    path_lazy_dfa: usize = 0,
+    path_lazy_dfa_fell_back: usize = 0,
+    no_lazy_dfa: usize = 0,
 };
 
 fn codeUnits(case: Case) bool {
     if (std.mem.indexOfAny(u8, case.flags, "uv") != null) return false;
     for (case.haystack) |b| if (b >= 0xf0) return true;
     return false;
+}
+
+fn spansEqlBoth(x: []const ?Regex.Span, y: []const ?Regex.Span) bool {
+    for (x, y) |p, q| if (!std.meta.eql(p, q)) return false;
+    return true;
 }
 
 fn spansEql(groups: anytype, want: []const ?[2]usize) bool {
@@ -78,16 +89,20 @@ test "V8's verdicts, through the ECMAScript dialect" {
     const file = try strand.json.parseLeaky(File, a, v8_verdicts.bytes, .{});
     var tally: Tally = .{};
     // Cases of one pattern and flags come together: each is compiled once.
-    var held: ?struct { case: Case, re: Regex, cache: Regex.Cache, hir: Hir } = null;
+    var held: ?struct { case: Case, re: Regex, cache: Regex.Cache, alone: Regex, alone_cache: Regex.Cache, hir: Hir } = null;
     defer if (held) |*h| {
         h.cache.deinit(testing.allocator);
         h.re.deinit();
+        h.alone_cache.deinit(testing.allocator);
+        h.alone.deinit();
     };
     for (file.cases) |case| {
         tally.cases += 1;
         if (held) |*h| if (!std.mem.eql(u8, h.case.pattern, case.pattern) or !std.mem.eql(u8, h.case.flags, case.flags)) {
             h.cache.deinit(testing.allocator);
             h.re.deinit();
+            h.alone_cache.deinit(testing.allocator);
+            h.alone.deinit();
             held = null;
         };
         if (held == null) {
@@ -101,15 +116,31 @@ test "V8's verdicts, through the ECMAScript dialect" {
                 return error.TestUnexpectedResult;
             };
             errdefer re.deinit();
+            if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
+            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0) } });
+            errdefer alone.deinit();
+            try testing.expect(!alone.engines().lazy_dfa);
             const ast = try a.create(@import("syntax/Ast.zig"));
             ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
             const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
-            held = .{ .case = case, .re = re, .cache = try re.cache(testing.allocator), .hir = hir };
+            var c = try re.cache(testing.allocator);
+            errdefer c.deinit(testing.allocator);
+            held = .{ .case = case, .re = re, .cache = c, .alone = alone, .alone_cache = try alone.cache(testing.allocator), .hir = hir };
         }
         const re = &held.?.re;
         const cache = &held.?.cache;
         const groups = try a.alloc(?Regex.Span, re.captureCount());
         const found = re.captures(cache, .of(case.haystack), groups);
+        switch (cache.last) {
+            .pikevm => {},
+            .lazy_dfa => tally.path_lazy_dfa += 1,
+            .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
+        }
+        const alone_groups = try a.alloc(?Regex.Span, re.captureCount());
+        if (held.?.alone.captures(&held.?.alone_cache, .of(case.haystack), alone_groups) != found or (found and !std.meta.eql(groups, alone_groups) and !spansEqlBoth(groups, alone_groups))) {
+            std.debug.print("/{s}/{s} on {any}: {any}, the PikeVM alone {any}\n", .{ case.pattern, case.flags, case.haystack, groups, alone_groups });
+            return error.TestUnexpectedResult;
+        }
         const units = codeUnits(case);
         if (ecma.exec(a, &held.?.hir, case.haystack, 1_000_000)) |said| {
             const same = if (said) |g| case.match != null and spansEql(g, case.match.?) else case.match == null;
@@ -150,6 +181,11 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .oracle_agree = 9422,
         .oracle_code_units = 3,
         .oracle_budget = 0,
+        // The lazy DFA answers the rest; it quits on a byte past 0x7f where `\b` or `m`'s lines
+        // read code points, and the PikeVM answers those.
+        .path_lazy_dfa = 9198,
+        .path_lazy_dfa_fell_back = 227,
+        .no_lazy_dfa = 0,
     }, tally);
 }
 
@@ -157,38 +193,13 @@ test "V8's verdicts, through the ECMAScript dialect" {
 
 const pieces = [_][]const u8{ "a", "a", "a", "b", "b", "_", " ", "\n", "\u{e9}", "\u{2028}", "\u{1f600}" };
 
-/// A pattern from a small grammar that reaches what the empty check is about: groups, captured
-/// or not, that can match empty, nested and quantified, alternatives with an empty branch.
-fn write(s: anytype, out: *std.ArrayList(u8), a: std.mem.Allocator, depth: u32) !void {
-    const leaves = [_][]const u8{ "a", "b", "", "a?", "b*", "\\b", "^", "$", ".", "[ab]", "\\w" };
-    const quantifiers = [_][]const u8{ "", "*", "+", "?", "{0,2}", "{1,3}", "{2}", "*?", "+?", "??", "{0,}" };
-    switch (if (depth == 0) 0 else shakedown.gen.intRange(s, usize, 0, 3)) {
-        0 => try out.appendSlice(a, leaves[shakedown.gen.intRange(s, usize, 0, leaves.len - 1)]),
-        1 => {
-            try out.appendSlice(a, if (shakedown.gen.boolean(s)) "(" else "(?:");
-            try write(s, out, a, depth - 1);
-            try out.appendSlice(a, ")");
-            try out.appendSlice(a, quantifiers[shakedown.gen.intRange(s, usize, 0, quantifiers.len - 1)]);
-        },
-        2 => {
-            try write(s, out, a, depth - 1);
-            try out.appendSlice(a, "|");
-            try write(s, out, a, depth - 1);
-        },
-        else => {
-            try write(s, out, a, depth - 1);
-            try write(s, out, a, depth - 1);
-        },
-    }
-}
-
 fn anyOracle(_: void, case: *shakedown.Case) !void {
     const s = case.source;
     var state: std.heap.ArenaAllocator = .init(case.gpa);
     defer state.deinit();
     const a = state.allocator();
     var out: std.ArrayList(u8) = .empty;
-    try write(s, &out, a, 4);
+    try grammar.write(s, &out, a, 4);
     const pattern = out.items;
     const options = [_][]const u8{ "", "u", "v", "i", "m", "s", "ui", "vi" };
     const flags = options[shakedown.gen.intRange(s, usize, 0, options.len - 1)];

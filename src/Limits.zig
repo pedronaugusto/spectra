@@ -14,5 +14,9 @@ nfa: aegis.units.Bytes(usize) = .literal("10MiB"),
 /// slots). The slot tables grow as states times groups, so it is many groups in a long pattern
 /// that reach it: 300 groups one after another (`(a)(a)...`) fit the default and 500 do not.
 cache: aegis.units.Bytes(usize) = .literal("32MiB"),
+/// The store of the lazy DFA's states in each `Cache`, within `cache`: regex-automata's default.
+/// It is cleared when full and never grows; a pattern whose fewest states do not fit has no lazy
+/// DFA (`Regex.engines`), and the PikeVM answers its searches.
+lazy_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),
 /// The largest dense DFA built ahead.
 dense_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),

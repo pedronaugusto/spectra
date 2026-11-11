@@ -41,40 +41,9 @@ pub const Input = struct {
 };
 
 /// A thread: a state, and with empty checks its bit, as one index (`state × lanes + bit`).
-const Key = u32;
+const Key = SparseSet.Key;
 
-const SparseSet = struct {
-    dense: []Key,
-    sparse: []u32,
-    len: u32 = 0,
-
-    fn init(gpa: Allocator, capacity: usize) Allocator.Error!SparseSet {
-        const dense = try gpa.alloc(Key, capacity);
-        errdefer gpa.free(dense);
-        const sparse = try gpa.alloc(u32, capacity);
-        @memset(sparse, 0);
-        return .{ .dense = dense, .sparse = sparse };
-    }
-
-    fn deinit(s: *SparseSet, gpa: Allocator) void {
-        gpa.free(s.dense);
-        gpa.free(s.sparse);
-    }
-
-    /// Adds `key`, and whether it was not there.
-    fn insert(s: *SparseSet, key: Key) bool {
-        const i = s.sparse[key];
-        if (i < s.len and s.dense[i] == key) return false;
-        s.dense[s.len] = key;
-        s.sparse[key] = s.len;
-        s.len += 1;
-        return true;
-    }
-
-    fn items(s: *const SparseSet) []const Key {
-        return s.dense[0..s.len];
-    }
-};
+const SparseSet = @import("SparseSet.zig");
 
 /// The threads at one position: which, and each one's slots.
 const Active = struct {
@@ -123,7 +92,7 @@ pub const Sizes = struct {
 
     /// The bytes they come to, or null past `usize`.
     pub fn bytes(s: Sizes) ?usize {
-        const set = mul(s.threads, @sizeOf(Key) + @sizeOf(u32)) orelse return null;
+        const set = mul(s.threads, SparseSet.bytesPer) orelse return null;
         const table = mul(mul(add(s.threads, 1) orelse return null, s.slots) orelse return null, @sizeOf(?usize)) orelse return null;
         const active = add(set, table) orelse return null;
         const both = mul(active, 2) orelse return null;
@@ -155,15 +124,16 @@ pub fn sizes(nfa: *const Nfa) Sizes {
 }
 
 /// Threads per state: two with empty checks, a bit each, else one.
-fn lanes(nfa: *const Nfa) u32 {
+pub fn lanes(nfa: *const Nfa) u32 {
     return if (nfa.loop_checks) 2 else 1;
 }
 
-fn keyOf(nfa: *const Nfa, id: Nfa.StateId, read: bool) Key {
+/// A thread's key: its state, and with empty checks its bit.
+pub fn keyOf(nfa: *const Nfa, id: Nfa.StateId, read: bool) Key {
     return if (nfa.loop_checks) id.raw() * 2 + @intFromBool(read) else id.raw();
 }
 
-fn stateOf(nfa: *const Nfa, key: Key) Nfa.StateId {
+pub fn stateOf(nfa: *const Nfa, key: Key) Nfa.StateId {
     return @fromBackingInt(if (nfa.loop_checks) key / 2 else key);
 }
 
