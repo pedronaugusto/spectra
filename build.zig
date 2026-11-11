@@ -10,9 +10,43 @@ pub fn build(b: *std.Build) void {
 
 fn spectraModule(b: *std.Build, p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) *std.Build.Module {
     const module = b.addModule("spectra", .{ .root_source_file = p.path("src/spectra.zig"), .target = target, .optimize = optimize });
+    addSourceImports(b, p, module, target, optimize);
+    return module;
+}
+
+/// What spectra's sources import: aegis, xenoglyph, ladar, and the prefilter kernels that need
+/// instructions beyond the target's baseline, each a module of its own built with them (Zig sets
+/// CPU features per module), entered only where ladar says the CPU has them. `kernels_teddy` is
+/// the scan they share, generic and inline, so each compiles it with its own instructions.
+fn addSourceImports(b: *std.Build, p: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
     module.addImport("aegis", p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis"));
     module.addImport("xenoglyph", p.dependency("xenoglyph", .{ .target = target, .optimize = optimize }).module("xenoglyph"));
-    return module;
+    module.addImport("ladar", p.dependency("ladar", .{ .target = target, .optimize = optimize }).module("ladar"));
+    const teddy = b.createModule(.{ .root_source_file = p.path("src/kernels/teddy.zig"), .target = target, .optimize = optimize });
+    module.addImport("kernels_teddy", teddy);
+    const Kernel = struct { name: []const u8, source: []const u8, features: std.Target.Cpu.Feature.Set };
+    const kernels: []const Kernel = switch (target.result.cpu.arch) {
+        .aarch64 => comptime &.{
+            .{ .name = "kernels_arm_neon", .source = "arm_neon", .features = std.Target.aarch64.featureSet(&.{.neon}) },
+        },
+        .x86_64 => comptime &.{
+            .{ .name = "kernels_x86_ssse3", .source = "x86_ssse3", .features = std.Target.x86.featureSet(&.{.ssse3}) },
+            .{ .name = "kernels_x86_avx2", .source = "x86_avx2", .features = std.Target.x86.featureSet(&.{.avx2}) },
+        },
+        else => &.{},
+    };
+    for (kernels) |k| {
+        var query = std.Target.Query.fromTarget(&target.result);
+        query.cpu_features_sub.removeFeatureSet(k.features);
+        query.cpu_features_add.addFeatureSet(k.features);
+        const kernel = b.createModule(.{
+            .root_source_file = p.path(b.fmt("src/kernels/{s}.zig", .{k.source})),
+            .target = b.resolveTargetQuery(query),
+            .optimize = optimize,
+            .imports = &.{.{ .name = "kernels_teddy", .module = teddy }},
+        });
+        module.addImport(k.name, kernel);
+    }
 }
 
 /// spectra's development: its tests and checks under preflight's gate. Run through bay.
@@ -25,23 +59,19 @@ pub fn dev(b: *std.Build, tools: type) void {
     const filters = if (test_filter) |filter| &.{filter} else &.{};
     const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
     const strand = b.dependency("strand", .{ .target = target, .optimize = optimize });
-    const tests = b.addTest(.{
-        .name = "spectra-tests",
-        .filters = filters,
-        .root_module = b.createModule(.{
-            .root_source_file = p.path("src/tests.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "aegis", .module = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis") },
-                .{ .name = "xenoglyph", .module = p.dependency("xenoglyph", .{ .target = target, .optimize = optimize }).module("xenoglyph") },
-                .{ .name = "shakedown", .module = shakedown.module("shakedown") },
-                .{ .name = "strand", .module = strand.module("strand") },
-                .{ .name = "regex_suite", .module = regexSuite(b, p) },
-                .{ .name = "v8_verdicts", .module = embedded(b, p, "testdata/v8/matches.json") },
-            },
-        }),
+    const test_module = b.createModule(.{
+        .root_source_file = p.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "shakedown", .module = shakedown.module("shakedown") },
+            .{ .name = "strand", .module = strand.module("strand") },
+            .{ .name = "regex_suite", .module = regexSuite(b, p) },
+            .{ .name = "v8_verdicts", .module = embedded(b, p, "testdata/v8/matches.json") },
+        },
     });
+    addSourceImports(b, p, test_module, target, optimize);
+    const tests = b.addTest(.{ .name = "spectra-tests", .filters = filters, .root_module = test_module });
     const check = b.step("check", "Compile the tests without running them");
     const test_step = b.step("test", "Run the tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);

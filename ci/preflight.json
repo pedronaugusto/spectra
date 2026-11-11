@@ -13,7 +13,17 @@
     "shakedown"
   ],
   "function_exceptions": {},
-  "layout_exceptions": {},
+  "layout_exceptions": {
+    "src/kernels": {
+      "files": [
+        "src/kernels/teddy.zig",
+        "src/kernels/x86_ssse3.zig",
+        "src/kernels/x86_avx2.zig",
+        "src/kernels/arm_neon.zig"
+      ],
+      "reason": "Each file is the root of a module of its own, the kernels built with the CPU features their instructions need (Zig sets features per module) and the scan they share; they share no namespace and are imported by module name, so an entry file would publish nothing."
+    }
+  },
   "glint_paths": [
     "src",
     "build.zig"

@@ -13,6 +13,10 @@
             .url = "git+https://github.com/pedronaugusto/xenoglyph#e8853a0a08813ec83f4c1dfa06277790d4445111",
             .hash = "xenoglyph-0.5.1-YKXZlR-OUwCe2E6P8lQFfUMnk2dOwWnWc95sJTEkd7QK",
         },
+        .ladar = .{
+            .url = "git+https://github.com/pedronaugusto/ladar#1464cbdb95e891c7d7e5a59351d2de0ca238f997",
+            .hash = "ladar-0.0.0-fezdEgNQAAAa6mzfw3ND7CbhvccdiC8I09QuC9Nf4_rk",
+        },
     },
     .dev_dependencies = .{
         .shakedown = .{

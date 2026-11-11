@@ -786,7 +786,9 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
         try lits.append(a, lit);
     }
     const seq = try literals.Seq.exactOf(a, lits.items);
-    var p = try prefilter.choose(case.gpa, &seq, 1 << 20) orelse return;
+    // Teddy where this CPU has its kernel, or Aho-Corasick: both reached.
+    const kernel = if (shakedown.gen.boolean(s)) prefilter.teddyKernel() else null;
+    var p = try prefilter.chooseWith(case.gpa, &seq, 1 << 20, kernel) orelse return;
     defer p.deinit(case.gpa);
     const h = try a.alloc(u8, shakedown.gen.intRange(s, usize, 0, 80));
     for (h) |*b| b.* = alphabet_[shakedown.gen.intRange(s, usize, 0, alphabet_.len - 1)];
@@ -801,7 +803,7 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
             want = at;
             break :scan;
         },
-        .pair, .aho => if (at + lit.len <= end and std.mem.eql(u8, h[at..][0..lit.len], lit)) {
+        .pair, .aho, .teddy => if (at + lit.len <= end and std.mem.eql(u8, h[at..][0..lit.len], lit)) {
             want = at;
             break :scan;
         },
@@ -810,13 +812,15 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
     reached_prefilter[@intFromEnum(p)] += 1;
 }
 
-var reached_prefilter: [3]usize = .{ 0, 0, 0 };
+var reached_prefilter: [4]usize = .{ 0, 0, 0, 0 };
 
 test "fuzz: a prefilter finds the first place a literal starts, as a plain scan does" {
-    reached_prefilter = .{ 0, 0, 0 };
+    reached_prefilter = .{ 0, 0, 0, 0 };
     try shakedown.check(gpa, {}, anyPrefilter, .{ .cases = 6000, .seed = 0x9fe });
     errdefer std.debug.print("{any}\n", .{reached_prefilter});
     try testing.expect(reached_prefilter[0] > 300 and reached_prefilter[1] > 300 and reached_prefilter[2] > 300);
+    // Teddy where this CPU has a kernel for it.
+    if (prefilter.teddyKernel() != null) try testing.expect(reached_prefilter[3] > 300);
 }
 
 test "a prefilter skips what cannot start a match, the literal strategy answers alone, and one that stops every few bytes is set aside" {
@@ -858,7 +862,7 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
     // Many literals: Aho-Corasick finds where one starts.
     var many = try compiled("(?:apple|banana|cherry|damson|elder)\\d", .{});
     defer many.deinit();
-    try testing.expect(many.prefilter.? == .aho);
+    if (prefilter.teddyKernel() != null) try testing.expect(many.prefilter.? == .teddy) else try testing.expect(many.prefilter.? == .aho);
     var many_cache = try many.cache(gpa);
     defer many_cache.deinit(gpa);
     const fruit = try std.mem.concat(a, u8, &.{ try repeatText(a, "a quiet line of text. ", 500), "cherry7" });

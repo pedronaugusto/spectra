@@ -3,8 +3,10 @@
 //! memchr for the one to three bytes every literal starts with, and for a single literal a
 //! search on its two rarest bytes (by `rank`) confirmed by the whole literal, both sixteen bytes
 //! a step in vectors that every target's baseline has (SSE2, NEON, or Zig's lowering elsewhere),
-//! with no run-time check; and for more literals Aho-Corasick, a DFA over the literals' byte
-//! classes whose every state knows the longest literal ending there.
+//! with no run-time check; for up to 64 literals Teddy (kernels/teddy.zig) where this CPU has
+//! the byte shuffle it needs (SSSE3 or AVX2 on x86-64, as ladar says; NEON on AArch64); and
+//! otherwise Aho-Corasick, a DFA over the literals' byte classes whose every state knows the
+//! longest literal ending there.
 //!
 //! Aho-Corasick finds literals by where they end, and the prefilter wants the leftmost start:
 //! it keeps the earliest start seen and reads on until no literal starting before it could
@@ -13,7 +15,10 @@
 //! A prefilter is chosen only where it can say no: every literal nonempty, so a match can only
 //! start where a literal does. A byte too common to skip much (`common`) is no prefilter.
 const std = @import("std");
+const builtin = @import("builtin");
 const aegis = @import("aegis");
+const ladar = @import("ladar");
+const teddy = @import("kernels_teddy");
 const Allocator = std.mem.Allocator;
 const literals = @import("hir/literals.zig");
 const rank = @import("prefilter/rank.zig").rank;
@@ -34,10 +39,13 @@ pub const Prefilter = union(enum) {
     pair: Pair,
     /// Any number of literals, each found whole.
     aho: Aho,
+    /// Up to 64 literals, each found whole, on the kernel this CPU has.
+    teddy: Teddy,
 
     pub fn deinit(p: *Prefilter, gpa: Allocator) void {
         switch (p.*) {
             .aho => |*a| a.deinit(gpa),
+            .teddy => |*t| t.table.deinit(gpa),
             else => {},
         }
         p.* = undefined;
@@ -47,6 +55,7 @@ pub const Prefilter = union(enum) {
     pub fn memory(p: *const Prefilter) usize {
         return switch (p.*) {
             .aho => |a| a.next.len * @sizeOf(u32) + a.longest.len,
+            .teddy => |t| t.table.bytes.len + t.table.literals.len * @sizeOf(teddy.Teddy.Literal),
             else => 0,
         };
     }
@@ -59,6 +68,7 @@ pub const Prefilter = union(enum) {
             .bytes => |b| findBytes(haystack[0..end], start, b.set[0..b.len]),
             .pair => |*pair| pair.find(haystack[0..end], start),
             .aho => |*a| a.find(haystack[0..end], start),
+            .teddy => |*t| t.find(haystack[0..end], start),
         };
     }
 
@@ -67,10 +77,39 @@ pub const Prefilter = union(enum) {
         return switch (p.*) {
             .bytes => 1,
             .pair => |pair| pair.len,
-            .aho => null,
+            .aho, .teddy => null,
         };
     }
 };
+
+/// The byte shuffle Teddy runs on.
+pub const Kernel = enum { x86_ssse3, x86_avx2, arm_neon };
+
+pub const Teddy = struct {
+    table: teddy.Teddy,
+    kernel: Kernel,
+
+    fn find(t: *const Teddy, haystack: []const u8, start: usize) ?usize {
+        return switch (t.kernel) {
+            .x86_avx2 => if (comptime builtin.cpu.arch == .x86_64 and ladar.available(.x86_avx2)) @import("kernels_x86_avx2").find(&t.table, haystack, start) else unreachable,
+            .x86_ssse3 => if (comptime builtin.cpu.arch == .x86_64 and ladar.available(.x86_ssse3)) @import("kernels_x86_ssse3").find(&t.table, haystack, start) else unreachable,
+            .arm_neon => if (comptime builtin.cpu.arch == .aarch64) @import("kernels_arm_neon").find(&t.table, haystack, start) else unreachable,
+        };
+    }
+};
+
+/// The Teddy kernel this CPU runs, or null where it has none.
+pub fn teddyKernel() ?Kernel {
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            if (comptime ladar.available(.x86_avx2)) if (ladar.has(.x86_avx2)) return .x86_avx2;
+            if (comptime ladar.available(.x86_ssse3)) if (ladar.has(.x86_ssse3)) return .x86_ssse3;
+            return null;
+        },
+        .aarch64 => return .arm_neon,
+        else => return null,
+    }
+}
 
 pub const Aho = struct {
     classes: [256]u8,
@@ -237,6 +276,11 @@ fn findBytes(haystack: []const u8, start: usize, set: []const u8) ?usize {
 /// The prefilter for a pattern whose matches start with `prefixes`, or null where none helps;
 /// an Aho-Corasick table is at most `limit` bytes.
 pub fn choose(gpa: Allocator, prefixes: *const literals.Seq, limit: usize) Allocator.Error!?Prefilter {
+    return chooseWith(gpa, prefixes, limit, teddyKernel());
+}
+
+/// `choose` with Teddy on `kernel`, or never where it is null.
+pub fn chooseWith(gpa: Allocator, prefixes: *const literals.Seq, limit: usize, kernel: ?Kernel) Allocator.Error!?Prefilter {
     const lits = prefixes.literals() orelse return null;
     if (lits.len == 0) return null;
     for (lits) |lit| if (lit.bytes.len == 0) return null;
@@ -247,6 +291,11 @@ pub fn choose(gpa: Allocator, prefixes: *const literals.Seq, limit: usize) Alloc
         const b = lit.bytes[0];
         if (std.mem.indexOfScalar(u8, set[0..len], b) != null) continue;
         if (len == 3) {
+            if (kernel) |k| if (lits.len <= teddy.max_literals) {
+                var bytes: [teddy.max_literals][]const u8 = undefined;
+                for (lits, 0..) |l, i| bytes[i] = l.bytes[0..@min(l.bytes.len, max_literal)];
+                return .{ .teddy = .{ .table = try teddy.Teddy.build(gpa, bytes[0..lits.len]), .kernel = k } };
+            };
             const a = try Aho.build(gpa, lits, limit) orelse return null;
             return .{ .aho = a };
         }
