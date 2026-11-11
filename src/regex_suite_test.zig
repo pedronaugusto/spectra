@@ -43,6 +43,20 @@ const Tally = struct {
     path_pikevm: usize = 0,
     path_lazy_dfa: usize = 0,
     path_lazy_dfa_fell_back: usize = 0,
+    /// Patterns with a lazy DFA but no reverse one.
+    no_reverse_dfa: usize = 0,
+    /// Matches found whose start each way found (`Regex.Cache.Start`).
+    start_pikevm: usize = 0,
+    start_reverse_dfa: usize = 0,
+    start_reverse_dfa_fell_back: usize = 0,
+
+    fn countStart(tally: *Tally, start: Regex.Cache.Start) void {
+        switch (start) {
+            .pikevm => tally.start_pikevm += 1,
+            .reverse_dfa => tally.start_reverse_dfa += 1,
+            .reverse_dfa_fell_back => tally.start_reverse_dfa_fell_back += 1,
+        }
+    }
 
     fn count(tally: *Tally, path: Regex.Cache.Path) void {
         switch (path) {
@@ -183,7 +197,8 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         tally.automata = std.hash.Wyhash.hash(tally.automata, pattern);
         tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
         if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
-    } else if (re.engines().lazy_dfa) {
+        if (re.engines().lazy_dfa and !re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
+    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa) {
         std.debug.print("{s}/{s}: /{s}/ has a lazy DFA in no store\n", .{ file, name, pattern });
         tally.failed += 1;
         return false;
@@ -218,6 +233,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         const found = it.next();
         tally.count(cache.last);
         const m = found orelse break;
+        tally.countStart(cache.last_start);
         if (k >= want.matches.len or !std.meta.eql(want.matches[k][0], @as(?Span, m))) {
             std.debug.print("{s}/{s}: /{s}/ {t}: find {d}: {any}, want {any}\n", .{ file, name, pattern, engines, k, m, if (k < want.matches.len) want.matches[k][0] else null });
             tally.failed += 1;
@@ -261,6 +277,7 @@ test "regex's own test suite, through the Rust dialect" {
         const tests = (doc.get("test") orelse continue).array;
         for (tests) |t| try runOne(a, file.name, t, &tally);
     }
+    errdefer std.debug.print("{any}\n", .{tally});
     try testing.expectEqual(@as(usize, 0), tally.failed);
     // Counted, so a test quietly passed over shows: every one run agrees.
     try testing.expectEqual(Tally{
@@ -277,5 +294,11 @@ test "regex's own test suite, through the Rust dialect" {
         .path_pikevm = 4531,
         .path_lazy_dfa = 4382,
         .path_lazy_dfa_fell_back = 149,
+        // Each match's start: the reverse lazy DFA's where the lazy DFA found its end, else the
+        // PikeVM's (the PikeVM's own run, and the searches the lazy DFA quit).
+        .no_reverse_dfa = 0,
+        .start_pikevm = 1567,
+        .start_reverse_dfa = 1489,
+        .start_reverse_dfa_fell_back = 0,
     }, tally);
 }

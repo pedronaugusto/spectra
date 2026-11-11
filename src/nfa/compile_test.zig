@@ -35,17 +35,25 @@ fn hirOf(a: std.mem.Allocator, pattern: []const u8, syntax: Syntax) !Hir {
 }
 
 fn compiled(pattern: []const u8, syntax: Syntax) !Compiled {
+    return compiledWay(pattern, syntax, false);
+}
+
+fn compiledWay(pattern: []const u8, syntax: Syntax, reverse: bool) !Compiled {
     var c: Compiled = .{ .arena_state = .init(testing.allocator), .hir = undefined, .nfa = undefined };
     errdefer c.arena_state.deinit();
     c.hir = try hirOf(c.arena_state.allocator(), pattern, syntax);
-    c.nfa = try compile_mod.compile(testing.allocator, &c.hir, .{ .utf8 = syntax.utf8, .ecma = syntax.dialect == .ecmascript }, null);
+    c.nfa = try compile_mod.compile(testing.allocator, &c.hir, .{ .utf8 = syntax.utf8, .ecma = syntax.dialect == .ecmascript, .reverse = reverse }, null);
     return c;
 }
 
 const dump = @import("../testing/nfa_dump.zig").dump;
 
 fn expectDump(pattern: []const u8, syntax: Syntax, expected: []const u8) !void {
-    var c = try compiled(pattern, syntax);
+    return expectDumpWay(pattern, syntax, false, expected);
+}
+
+fn expectDumpWay(pattern: []const u8, syntax: Syntax, reverse: bool, expected: []const u8) !void {
+    var c = try compiledWay(pattern, syntax, reverse);
     defer c.deinit();
     const got = try dump(c.arena_state.allocator(), &c.nfa);
     try testing.expectEqualStrings(expected, got);
@@ -523,6 +531,18 @@ fn anyCompile(_: void, case: *shakedown.Case) !void {
     };
     defer nfa.deinit(case.gpa);
     try expectWellFormed(&nfa);
+    // Reversed: anchored, no captures, and no empty checks in either dialect.
+    var reversed = compile_mod.compile(case.gpa, &hir, .{ .utf8 = syntax.utf8, .ecma = syntax.dialect == .ecmascript, .reverse = true }, null) catch |err| switch (err) {
+        error.TooLarge => null,
+        error.Unsupported => return error.TestUnexpectedResult,
+        error.OutOfMemory => return err,
+    };
+    if (reversed) |*back| {
+        defer back.deinit(case.gpa);
+        try expectWellFormed(back);
+        try testing.expect(back.start_anchored == back.start_unanchored and !back.loop_checks);
+        for (back.states) |st| try testing.expect(st != .capture and st != .clear);
+    }
 
     const slots = try case.gpa.alloc(?usize, nfa.slots());
     var haystack: [8]u8 = undefined;
@@ -638,4 +658,126 @@ test "an ECMAScript time past the minimum of an operand that can match empty is 
         \\5: match
         \\
     );
+}
+
+/// Whether the reverse automaton of a lone class takes `bytes` read last first, every way at
+/// once: its heads are alternatives.
+fn reverseTakes(gpa: std.mem.Allocator, nfa: *const Nfa, bytes: []const u8) !bool {
+    const seen = try gpa.alloc(bool, nfa.states.len);
+    defer gpa.free(seen);
+    var now: std.ArrayList(Nfa.StateId) = .empty;
+    defer now.deinit(gpa);
+    var then: std.ArrayList(Nfa.StateId) = .empty;
+    defer then.deinit(gpa);
+    @memset(seen, false);
+    try closeOver(gpa, nfa, &now, seen, nfa.start_anchored);
+    var k = bytes.len;
+    while (k > 0) : (k -= 1) {
+        then.clearRetainingCapacity();
+        @memset(seen, false);
+        for (now.items) |id| if (step(nfa, nfa.state(id), bytes[k - 1])) |t| try closeOver(gpa, nfa, &then, seen, t);
+        std.mem.swap(std.ArrayList(Nfa.StateId), &now, &then);
+    }
+    for (now.items) |id| if (nfa.state(id) == .match) return true;
+    return false;
+}
+
+fn closeOver(gpa: std.mem.Allocator, nfa: *const Nfa, into: *std.ArrayList(Nfa.StateId), seen: []bool, from: Nfa.StateId) !void {
+    if (seen[from.raw()]) return;
+    seen[from.raw()] = true;
+    switch (nfa.state(from)) {
+        .binary => |b| {
+            try closeOver(gpa, nfa, into, seen, b.first);
+            try closeOver(gpa, nfa, into, seen, b.second);
+        },
+        .alternation => |slice| for (nfa.alternativesOf(slice)) |alt| try closeOver(gpa, nfa, into, seen, alt),
+        else => try into.append(gpa, from),
+    }
+}
+
+/// Whether reversed and forward take the encoding of `cp` alike.
+fn expectReverseAlike(fwd: *const Nfa, back: *const Nfa, cp: u21) !void {
+    if (cp >= 0xd800 and cp <= 0xdfff) return;
+    var buf: [4]u8 = undefined;
+    const n = try std.unicode.utf8Encode(cp, &buf);
+    const member = classTakes(fwd, buf[0..n]);
+    if (member != try reverseTakes(testing.allocator, back, buf[0..n])) {
+        std.debug.print("reversed at U+{X}: member {}\n", .{ cp, member });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "reversed, the automaton matches each match backwards: parts and bytes in the other order, Rust's repetitions, no captures" {
+    try expectDumpWay("ab|c", .{}, true,
+        \\0>^: alt(1, 3)
+        \\1: 62 => 2
+        \\2: 61 => 4
+        \\3: 63 => 4
+        \\4: match
+        \\
+    );
+    try expectDumpWay("(a)\\b(?:bc)+", .{}, true,
+        \\0>^: 63 => 1
+        \\1: 62 => 2
+        \\2: alt(0, 3)
+        \\3: look(word_unicode) => 4
+        \\4: 61 => 5
+        \\5: match
+        \\
+    );
+    // ECMAScript's `(?:a?)*` reversed is Rust's: the strings are the same, and no bit is carried.
+    try expectDumpWay("(?:a?)*", .{ .dialect = .ecmascript }, true,
+        \\0: 61 => 2
+        \\1: alt(0, 2)
+        \\2: alt(1, 4)
+        \\3>^: alt(1, 4)
+        \\4: match
+        \\
+    );
+    // A UTF-8 class: each sequence's chain from its last byte back, the heads as alternatives.
+    try expectDumpWay("[a\\u{e9}-\\u{ea}\\u{100}]", .{}, true,
+        \\0: 61 => 6
+        \\1: c3 => 6
+        \\2: a9-aa => 1
+        \\3: c4 => 6
+        \\4: 80 => 3
+        \\5>^: alt(0, 2, 4)
+        \\6: match
+        \\
+    );
+}
+
+test "reversed, a UTF-8 class takes the encoding of each of its code points backwards and nothing else" {
+    for ([_][]const u8{ "[\\p{Greek}\\d]", "[\\u{7f}-\\u{801}\\u{fff0}-\\u{10010}\\u{10fff0}-\\u{10ffff}]" }) |pattern| {
+        var c = try compiledWay(pattern, .{}, true);
+        defer c.deinit();
+        var fwd = try compiled(pattern, .{});
+        defer fwd.deinit();
+        // Every code point of one or two bytes, and a few each side of each range's ends and of
+        // each length of encoding.
+        for (0..0x800) |cp| try expectReverseAlike(&fwd.nfa, &c.nfa, @intCast(cp));
+        const ranges = fwd.hir.node(fwd.hir.root).unicode_class;
+        var edges: std.ArrayList(u21) = .empty;
+        defer edges.deinit(testing.allocator);
+        for (ranges) |range| try edges.appendSlice(testing.allocator, &range);
+        try edges.appendSlice(testing.allocator, &.{ 0x7ff, 0x800, 0xd7ff, 0xe000, 0xffff, 0x10000, 0x10ffff });
+        for (edges.items) |edge| {
+            const lo = edge -| 3;
+            const hi = @min(edge + 3, 0x10ffff);
+            for (lo..hi + 1) |cp| try expectReverseAlike(&fwd.nfa, &c.nfa, @intCast(cp));
+        }
+        // Every string of one to three bytes from those at the edges of UTF-8's byte classes, a
+        // code point's encoding or not.
+        const edgy = [_]u8{ 0x00, 0x7f, 0x80, 0x9f, 0xa0, 0xbf, 0xc0, 0xce, 0xe0, 0xed, 0xf0, 0xf4, 0xff };
+        for (0..edgy.len * (1 + edgy.len * (1 + edgy.len))) |i| {
+            const n: usize = if (i < edgy.len) 1 else if (i < edgy.len * (1 + edgy.len)) 2 else 3;
+            var k = i - (if (n == 1) 0 else if (n == 2) edgy.len else edgy.len * (1 + edgy.len));
+            var bytes: [3]u8 = undefined;
+            for (bytes[0..n]) |*b| {
+                b.* = edgy[k % edgy.len];
+                k /= edgy.len;
+            }
+            try testing.expectEqual(classTakes(&fwd.nfa, bytes[0..n]), try reverseTakes(testing.allocator, &c.nfa, bytes[0..n]));
+        }
+    }
 }

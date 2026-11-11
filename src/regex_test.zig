@@ -195,7 +195,21 @@ test "fuzz: the PikeVM's match and captures are the backtracker's" {
 // The lazy DFA against the PikeVM.
 
 /// What the fuzz below reached, so a change that stops it reaching them shows.
-var reached: struct { answered: usize = 0, cleared: usize = 0, gave_up: usize = 0, quit: usize = 0, checked: usize = 0 } = .{};
+var reached: struct {
+    answered: usize = 0,
+    cleared: usize = 0,
+    gave_up: usize = 0,
+    quit: usize = 0,
+    checked: usize = 0,
+    /// The reverse lazy DFA's start, against the PikeVM's: found, with empty checks forward, and
+    /// given up.
+    reversed: usize = 0,
+    reversed_checked: usize = 0,
+    reverse_gave_up: usize = 0,
+    /// Reversed, a look forward never has may quit: ECMAScript keeps no time of `(?:^)*`, Rust's
+    /// shape one.
+    reverse_quit: usize = 0,
+} = .{};
 
 fn anyLazy(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -229,11 +243,27 @@ fn anyLazy(_: void, case: *shakedown.Case) !void {
         if (shakedown.gen.boolean(s)) lo = 0;
         if (shakedown.gen.boolean(s)) hi = h.len;
         var input: pikevm.Input = .{ .haystack = h, .span = .{ .start = lo, .end = hi }, .anchored = shakedown.gen.intRange(s, u8, 0, 3) == 0 };
-        const want = pikevm.search(&re.nfa, &cache.pike, input, &.{});
-        if (lazy.search(&re.nfa, d, &cache.lazy.?, input)) |got| {
+        var slots: [2]?usize = undefined;
+        const want = pikevm.search(&re.nfa, &cache.pike, input, &slots);
+        var from: usize = undefined;
+        if (lazy.searchFrom(&re.nfa, d, &cache.lazy.?, input, &from)) |got| {
             try testing.expectEqual(want, got);
             reached.answered += 1;
             if (re.nfa.loop_checks) reached.checked += 1;
+            // Read back from the end, the earliest start of a match ending there is the
+            // leftmost-first match's: forward with ECMAScript's empty checks, reversed without.
+            if (got) |end| if (re.reverse) |*r| {
+                var back = input;
+                back.span = .{ .start = from, .end = end };
+                if (lazy.searchReverse(&r.nfa, &r.dfa, &cache.reverse.?, back)) |start| {
+                    try testing.expectEqual(slots[0], start);
+                    reached.reversed += 1;
+                    if (re.nfa.loop_checks) reached.reversed_checked += 1;
+                } else |err| switch (err) {
+                    error.Quit => reached.reverse_quit += 1,
+                    error.GaveUp => reached.reverse_gave_up += 1,
+                }
+            };
         } else |err| switch (err) {
             error.Quit => reached.quit += 1,
             error.GaveUp => reached.gave_up += 1,
@@ -250,6 +280,7 @@ test "fuzz: the lazy DFA's match ends are the PikeVM's, in both dialects, throug
     errdefer std.debug.print("{any}\n", .{reached});
     try testing.expect(reached.answered > 10_000 and reached.checked > 1_000);
     try testing.expect(reached.cleared > 100 and reached.gave_up > 10 and reached.quit > 100);
+    try testing.expect(reached.reversed > 5_000 and reached.reversed_checked > 1_000 and reached.reverse_gave_up > 0);
 }
 
 test "the lazy DFA runs a position's closure whole, as the PikeVM does: an alternation a loop returns to is entered once" {
@@ -395,6 +426,59 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     try testing.expect(work[1].pike >= 3 * work[0].pike);
 }
 
+test "a reverse lazy DFA that gives up leaves the start to the PikeVM, over the span cut at the end, and the work stays linear" {
+    // Forward, (a|b){20}a(a|b)* counts to twenty and is small; read back from the end, every match
+    // counts, so the state holds which of the last twenty-one bytes read were an a: on random a
+    // and b nearly every byte builds one.
+    const pattern = "(a|b){20}a(a|b)*";
+    var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
+    defer re.deinit();
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true }, re.engines());
+    const big = try gpa.alloc(u8, 64 * 1024);
+    defer gpa.free(big);
+    var prng: std.Random.DefaultPrng = .init(0x7e5e);
+    for (big) |*b| b.* = if (prng.random().boolean()) 'a' else 'b';
+    big[20] = 'a';
+    var work: [2]struct { reverse: usize, pike: usize } = undefined;
+    for ([_]usize{ 16 * 1024, big.len }, 0..) |n, i| {
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        try testing.expectEqual(Regex.Span{ .start = 0, .end = n }, re.find(&cache, .of(big[0..n])).?);
+        try testing.expectEqual(.lazy_dfa, cache.last);
+        try testing.expectEqual(.reverse_dfa_fell_back, cache.last_start);
+        work[i] = .{ .reverse = cache.reverse.?.visited, .pike = cache.pike.visited };
+    }
+    errdefer std.debug.print("{any}\n", .{work});
+    // The give-up comes after about as many bytes read back, whatever the haystack's length.
+    try testing.expect(work[1].reverse <= 2 * work[0].reverse);
+    try testing.expect(work[1].reverse + work[1].pike <= 4 * (work[0].reverse + work[0].pike));
+}
+
+test "the reverse lazy DFA finds where the leftmost-first match starts, with each look read the other way" {
+    const cases = [_]struct { pattern: []const u8, syntax: Syntax = .{}, haystack: []const u8, want: Regex.Span }{
+        .{ .pattern = "abc", .haystack = "xxabcxx", .want = .{ .start = 2, .end = 5 } },
+        .{ .pattern = "a+", .haystack = "baaab", .want = .{ .start = 1, .end = 4 } },
+        .{ .pattern = "\\bfoo\\b", .haystack = "afoo foo", .want = .{ .start = 5, .end = 8 } },
+        .{ .pattern = "\\Bo+", .haystack = "o foo", .want = .{ .start = 3, .end = 5 } },
+        .{ .pattern = "(?m)^b$", .haystack = "a\nb\nc", .want = .{ .start = 2, .end = 3 } },
+        .{ .pattern = "(?Rm)^b$", .haystack = "a\r\nb\r\nc", .want = .{ .start = 3, .end = 4 } },
+        .{ .pattern = "\\Ab|c\\z", .haystack = "bc", .want = .{ .start = 0, .end = 1 } },
+        .{ .pattern = "\\p{Greek}+\\d", .haystack = "x\u{3b1}\u{3b2}7", .want = .{ .start = 1, .end = 6 } },
+        .{ .pattern = "[\u{e9}\u{10000}-\u{10ffff}]+", .haystack = "a\u{e9}\u{1f600}b", .want = .{ .start = 1, .end = 7 } },
+        .{ .pattern = "(?:a?)*b", .syntax = ecma, .haystack = "xaab", .want = .{ .start = 1, .end = 4 } },
+        .{ .pattern = "(a*)*b", .syntax = ecma, .haystack = "cb", .want = .{ .start = 1, .end = 2 } },
+    };
+    for (cases) |case| {
+        var re = try compiled(case.pattern, case.syntax);
+        defer re.deinit();
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
+        try testing.expectEqual(case.want, re.find(&cache, .of(case.haystack)).?);
+        try testing.expectEqual(.reverse_dfa, cache.last_start);
+    }
+}
+
 test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f, and the PikeVM answers" {
     const cases = [_]struct { pattern: []const u8, syntax: Syntax = .{}, ascii: []const u8, wide: []const u8, want: [2]Regex.Span }{
         .{ .pattern = "\\bb\\b", .ascii = "a b c", .wide = "\u{e9} b c", .want = .{ .{ .start = 2, .end = 3 }, .{ .start = 3, .end = 4 } } },
@@ -422,14 +506,14 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
 test "a store too small for the fewest states leaves the pattern no lazy DFA, and says so" {
     var re = try Regex.compile(gpa, .init("a+b"), .{ .limits = .{ .lazy_dfa = .fromRaw(64) } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false }, re.engines());
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     try testing.expectEqual(Regex.Span{ .start = 1, .end = 4 }, re.find(&cache, .of("xaab")).?);
     try testing.expectEqual(.pikevm, cache.last);
     var roomy = try Regex.compile(gpa, .init("a+b"), .{});
     defer roomy.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true }, roomy.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true }, roomy.engines());
 }
 
 // Every match in turn, counted.

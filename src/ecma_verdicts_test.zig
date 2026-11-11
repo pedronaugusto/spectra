@@ -60,6 +60,12 @@ const Tally = struct {
     path_lazy_dfa: usize = 0,
     path_lazy_dfa_fell_back: usize = 0,
     no_lazy_dfa: usize = 0,
+    /// Each case's match found again by `find`, its start each way (`Regex.Cache.Start`), and
+    /// the same span as the captures' group 0.
+    start_reverse_dfa: usize = 0,
+    start_reverse_dfa_fell_back: usize = 0,
+    start_pikevm: usize = 0,
+    no_reverse_dfa: usize = 0,
 };
 
 fn codeUnits(case: Case) bool {
@@ -117,6 +123,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             };
             errdefer re.deinit();
             if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
+            if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
             var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0) } });
             errdefer alone.deinit();
             try testing.expect(!alone.engines().lazy_dfa);
@@ -136,6 +143,16 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .lazy_dfa => tally.path_lazy_dfa += 1,
             .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
         }
+        const span = re.find(cache, .of(case.haystack));
+        if (found != (span != null) or (found and !std.meta.eql(groups[0].?, span.?))) {
+            std.debug.print("/{s}/{s} on {any}: find {any}, captures {any}\n", .{ case.pattern, case.flags, case.haystack, span, groups[0] });
+            return error.TestUnexpectedResult;
+        }
+        if (span != null) switch (cache.last_start) {
+            .pikevm => tally.start_pikevm += 1,
+            .reverse_dfa => tally.start_reverse_dfa += 1,
+            .reverse_dfa_fell_back => tally.start_reverse_dfa_fell_back += 1,
+        };
         const alone_groups = try a.alloc(?Regex.Span, re.captureCount());
         if (held.?.alone.captures(&held.?.alone_cache, .of(case.haystack), alone_groups) != found or (found and !std.meta.eql(groups, alone_groups) and !spansEqlBoth(groups, alone_groups))) {
             std.debug.print("/{s}/{s} on {any}: {any}, the PikeVM alone {any}\n", .{ case.pattern, case.flags, case.haystack, groups, alone_groups });
@@ -167,6 +184,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             return error.TestUnexpectedResult;
         }
     }
+    errdefer std.debug.print("{any}\n", .{tally});
     try testing.expectEqualStrings("v26.10.0", file.node);
     // Counted, so a change in either direction shows. Captures clear per iteration (17 cases
     // came to agree) and an iteration past the minimum that matched empty fails (the rest): the
@@ -186,6 +204,12 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .path_lazy_dfa = 9198,
         .path_lazy_dfa_fell_back = 227,
         .no_lazy_dfa = 0,
+        // `find` says what the captures' group 0 says on every case; the reverse lazy DFA finds
+        // each start where the lazy DFA found the end, through ECMAScript's empty checks forward.
+        .start_reverse_dfa = 3201,
+        .start_reverse_dfa_fell_back = 0,
+        .start_pikevm = 40,
+        .no_reverse_dfa = 0,
     }, tally);
 }
 

@@ -21,6 +21,16 @@
 //! (pikevm.zig; Barrière and Pit-Claudel, PLDI 2024 §4.1); a seed has just read a byte, or is
 //! the start, and its bit is set either way, so a seed is its state alone.
 //!
+//! Reversed (`Direction.reverse`, over compile.zig's reverse automaton), it reads from a match's
+//! end back towards the span's start and finds where the match ending there that starts
+//! earliest begins: the leftmost-first match's start, since none starts before it. A state's
+//! context is then the byte after it, the byte read is the one before, and every look is decided
+//! by the two the other way round, so `\b` and CRLF's lines mean what they mean forward; the
+//! haystack's end is a context of its own. Every match counts, none is preferred: a match drops
+//! no thread after it, and the scan goes on to the span's start or the dead state. Bytes past
+//! 0x7f quit as forward. The reverse automaton has no empty checks, and its lazy DFA no bits:
+//! compile.zig says why the strings are the same.
+//!
 //! The cache has a fixed capacity, allocated once, and is cleared when full; the state being
 //! left is kept across the clear. A pattern whose DFA outgrows the capacity would clear on
 //! almost every byte, so after three clears a search that read fewer than ten bytes per state
@@ -49,8 +59,12 @@ pub const Error = error{
 };
 
 /// The byte before a position, as the automaton's assertions tell bytes apart: none (the
-/// haystack's start), a line feed, a carriage return, a word byte, or another.
+/// haystack's start), a line feed, a carriage return, a word byte, or another. Reversed, the
+/// byte after it, and none is the haystack's end.
 pub const Context = enum(u3) { start, lf, cr, word, other };
+
+/// Which way a lazy DFA reads.
+pub const Direction = enum { forward, reverse };
 
 /// The byte after a position: the same, or the haystack's end.
 const Ahead = enum(u3) { end, lf, cr, word, other };
@@ -78,6 +92,7 @@ const returns: LookSet = .initMany(&.{ .start_line_crlf, .end_line_crlf, .start_
 /// What an automaton's lazy DFA is, worked out once at compile: its alphabet, what each byte is
 /// to the assertions, and how its cache divides. Immutable; every state lives in a `Cache`.
 pub const Dfa = struct {
+    direction: Direction,
     /// Each byte's class: bytes that no transition and no assertion tells apart.
     classes: [256]u8,
     /// A row's length: the classes, and the haystack's end.
@@ -86,7 +101,7 @@ pub const Dfa = struct {
     quit: ?u8,
     /// What each byte is to the assertions, before a position or after it.
     kinds: [256]Context,
-    /// What the haystack's start is to them.
+    /// What the haystack's start is to them, or reversed its end.
     start: Context,
     /// States and key entries a cache holds.
     states: u32,
@@ -111,8 +126,9 @@ pub const Dfa = struct {
 
 /// The lazy DFA of `nfa` with a store of `capacity` bytes, or null when that cannot hold the
 /// fewest states a search needs: the pattern then has no lazy DFA (`Regex.engines`).
-pub fn build(nfa: *const Nfa, capacity: usize) ?Dfa {
+pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction) ?Dfa {
     var d: Dfa = undefined;
+    d.direction = direction;
     const quit = nfa.looks.intersectWith(wide).count() > 0;
     const word = nfa.looks.intersectWith(words).count() > 0;
     const lf = nfa.looks.intersectWith(lines).count() > 0;
@@ -136,7 +152,9 @@ pub fn build(nfa: *const Nfa, capacity: usize) ?Dfa {
     d.stride = class + 2;
     d.quit = if (quit) d.classes[0x80] else null;
     // The start is a line's start and no word byte: a line feed, unless `\A` tells them apart.
-    d.start = if (nfa.looks.contains(.start_text)) .start else if (lf) .lf else .other;
+    // Reversed, the end stays itself: CRLF's `$` holds at the end always, but before a line feed
+    // only where no carriage return comes before it, so the end is no line feed.
+    d.start = if (direction == .reverse or nfa.looks.contains(.start_text)) .start else if (lf) .lf else .other;
 
     const lanes = pikevm.lanes(nfa);
     d.threads = @intCast(nfa.states.len * lanes);
@@ -185,9 +203,10 @@ fn holds(look: Look, before: Context, ahead: Ahead) bool {
     };
 }
 
+/// A context as the byte after a position: reversed, the state's context, where none is the end.
 fn aheadOf(kind: Context) Ahead {
     return switch (kind) {
-        .start => unreachable,
+        .start => .end,
         .lf => .lf,
         .cr => .cr,
         .word => .word,
@@ -340,18 +359,65 @@ fn hashOf(context: Context, match: bool, keys: []const Key) u32 {
 /// Where the leftmost-first match in `input` ends, or with `earliest` where some match ends;
 /// in UTF-8, an empty match that would split a code point is passed over, as the PikeVM does.
 pub fn search(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
+    var from: usize = undefined;
+    return searchFrom(nfa, d, c, input, &from);
+}
+
+/// `search`, and in `from` where the search that found it began: the span's start, or past it
+/// where an empty match split a code point. The match is the leftmost-first from there.
+pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from: *usize) Error!?usize {
+    aegis.assert.invariant(d.direction == .forward, "a forward search reads a forward lazy DFA");
     aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
     aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
     c.visited = 0;
+    from.* = input.span.start;
     var end = try searchOnce(nfa, d, c, input) orelse return null;
     if (!(nfa.utf8 and nfa.empty_ok)) return end;
     var again = input;
     while (!pikevm.isBoundary(input.haystack, end)) {
         if (input.anchored) return null;
         again.span.start += 1;
+        from.* = again.span.start;
         end = try searchOnce(nfa, d, c, again) orelse return null;
     }
     return end;
+}
+
+/// Reversed: where the match ending at `input.span.end` that starts earliest begins, no earlier
+/// than `input.span.start`, or null where none ends there. `nfa` is the reverse automaton.
+pub fn searchReverse(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
+    aegis.assert.invariant(d.direction == .reverse, "a reverse search reads a reverse lazy DFA");
+    aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
+    aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
+    c.visited = 0;
+    const h = input.haystack;
+    const context: Context = if (input.span.end == h.len) d.start else blk: {
+        const b = h[input.span.end];
+        if (d.quit != null and b >= 0x80) return error.Quit;
+        break :blk d.kinds[b];
+    };
+    var s = try startOf(nfa, d, c, context, true);
+    var found: ?usize = null;
+    var at = input.span.end;
+    while (at > input.span.start) : (at -= 1) {
+        if (s == dead) return found;
+        const class = d.classes[h[at - 1]];
+        if (d.quit == class) return error.Quit;
+        c.visited += 1;
+        c.bytes_since += 1;
+        const t = c.rows[@as(usize, s) * d.stride + class];
+        s = if (t != unknown) t else try next(nfa, d, c, s, h[at - 1]);
+        if (c.recs[s].match) found = at;
+    }
+    if (s == dead) return found;
+    // The byte before the span, or the haystack's start, decides a match that starts at its start.
+    const before: ?u8 = if (input.span.start > 0) h[input.span.start - 1] else null;
+    const class: u32 = if (before) |b| d.classes[b] else d.stride - 1;
+    if (before) |b| if (d.quit == d.classes[b]) return error.Quit;
+    const t = c.rows[@as(usize, s) * d.stride + class];
+    s = if (t != unknown) t else try next(nfa, d, c, s, before);
+    if (c.recs[s].match) found = input.span.start;
+    return found;
 }
 
 fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
@@ -392,6 +458,10 @@ fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored:
         if (d.quit != null and b >= 0x80) return error.Quit;
         break :blk d.kinds[b];
     };
+    return startOf(nfa, d, c, context, anchored);
+}
+
+fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored: bool) Error!u32 {
     const index = @as(usize, @intFromEnum(context)) * 2 + @intFromBool(anchored);
     if (c.starts[index] != unknown) return c.starts[index];
     const seed: Key = (if (anchored) nfa.start_anchored else nfa.start_unanchored).raw();
@@ -404,11 +474,15 @@ fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored:
 /// goes: the PikeVM's step at that position. The seeds' closure, every look decided by the byte
 /// before and `unit`; then each thread in order reads `unit` and its target is a seed of the next
 /// state, once; the first thread at the match makes the next state a match and drops every
-/// thread after it (leftmost-first).
+/// thread after it (leftmost-first). Reversed, `unit` is the byte before and the state's context
+/// the byte after, and a match drops nothing.
 fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Error!u32 {
     var from = from_id;
     const rec = c.recs[from];
-    const decide: Decide = .{ .before = rec.context, .ahead = if (unit) |b| aheadOf(d.kinds[b]) else .end };
+    const decide: Decide = switch (d.direction) {
+        .forward => .{ .before = rec.context, .ahead = if (unit) |b| aheadOf(d.kinds[b]) else .end },
+        .reverse => .{ .before = if (unit) |b| d.kinds[b] else .start, .ahead = aheadOf(rec.context) },
+    };
     c.a.len = 0;
     // A seed has just read a byte, or is the start: its bit is set.
     for (c.keys[rec.start..][0..rec.len]) |seed| closure(nfa, c, @fromBackingInt(seed), decide);
@@ -418,7 +492,8 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
         const target: ?Nfa.StateId = switch (nfa.state(pikevm.stateOf(nfa, key))) {
             .match => {
                 match = true;
-                break;
+                if (d.direction == .forward) break;
+                continue;
             },
             .byte_range => |t| if (unit) |b| (if (t.contains(b)) t.next else null) else null,
             .sparse => |slice| if (unit) |b| stepSparse(nfa, slice, b) else null,

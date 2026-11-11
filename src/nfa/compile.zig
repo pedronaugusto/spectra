@@ -23,6 +23,16 @@
 //! Pit-Claudel, "Linear Matching of JavaScript Regular Expressions", PLDI 2024, §4.1). Neither
 //! `(x+)?` nor the clamp of an atom that matches only empty to one time is ECMAScript's.
 //!
+//! Reversed (`Options.reverse`), the automaton matches each match of the pattern read backwards,
+//! for the reverse search that finds where a match ends from where it starts: a concatenation's
+//! parts in the other order, a literal's bytes backwards, a UTF-8 class as the reversed chains
+//! of its sequences, and no captures. Only which strings match counts there, never which way
+//! is preferred, so a repetition takes Rust's shape in either dialect: ECMAScript's empty checks
+//! prune ways of matching, not strings, since an iteration past the minimum that matched empty
+//! can always be left out, and a capture's clearing changes no string. That stops being true
+//! where an empty iteration can constrain the string, which backreferences and lookaround
+//! bodies would: a pattern holding one gets no reverse automaton until it is thought again.
+//!
 //! ECMAScript's lookahead runs on the derivative engine, not on this automaton; until that is
 //! built a pattern holding one is refused (`Unsupported`, `unsupported_lookahead`).
 const std = @import("std");
@@ -49,6 +59,8 @@ pub const Options = struct {
     /// ECMA-262's iterations: each clears the captures of the groups in its atom, and one past
     /// the minimum that matches empty fails.
     ecma: bool = false,
+    /// The automaton of the matches read backwards, anchored, with no captures.
+    reverse: bool = false,
 };
 
 /// The automaton of `hir`, owned by the caller (`Nfa.deinit`).
@@ -64,7 +76,8 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     const limit = options.limits.nfa.raw();
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma } };
+    // Reversed, only the strings count: Rust's repetitions match the same ones (the file's doc).
+    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse }, .reverse = options.reverse };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
@@ -198,15 +211,27 @@ const Compiler = struct {
     b: Builder,
     hir: *const Hir,
     repeats: Repeats,
+    reverse: bool,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
     utf8_depth: usize = 0,
     /// Finished states of the class being compiled, by their transitions' hash.
     cache: std.AutoHashMapUnmanaged(u64, u32) = .empty,
+    /// Reversed: the states of the class being compiled, by what they read and lead to.
+    chains: std.AutoHashMapUnmanaged(Trans, u32) = .empty,
+    heads: std.ArrayList(u32) = .empty,
 
     fn run(c: *Compiler) BuildError!Starts {
         try c.properties();
+        if (c.reverse) {
+            // Anchored at the match's end, where the reverse search starts; no captures.
+            const body = try c.walk(c.hir.root);
+            const m = try c.b.add(.match);
+            c.b.patch(body.end, m);
+            const root = c.props[@backingInt(c.hir.root)];
+            return .{ .anchored = body.start, .unanchored = body.start, .empty_ok = root.empty_ok };
+        }
         const s0 = try c.b.add(.{ .capture = .{ .group = 0, .slot = 0, .next = unset } });
         const body = try c.walk(c.hir.root);
         const e0 = try c.b.add(.{ .capture = .{ .group = 0, .slot = 1, .next = unset } });
@@ -303,7 +328,10 @@ const Compiler = struct {
                     const id = try c.b.add(.{ .look = .{ .look = l, .next = unset } });
                     return .{ .start = id, .end = id };
                 },
-                .capture => {},
+                .capture => |cap| if (c.reverse) {
+                    index = cap.sub;
+                    continue;
+                },
                 .concat => |slice| switch (slice.len) {
                     0 => return try c.empty(),
                     1 => {
@@ -370,7 +398,7 @@ const Compiler = struct {
                 }
                 if (f.step < children.len) {
                     f.step += 1;
-                    return .{ .descend = children[f.step - 1] };
+                    return .{ .descend = if (c.reverse) children[children.len - f.step] else children[f.step - 1] };
                 }
                 return .{ .finished = f.acc };
             },
@@ -517,7 +545,8 @@ const Compiler = struct {
     fn literal(c: *Compiler, bytes: []const u8) BuildError!Fragment {
         if (bytes.len == 0) return c.empty();
         var fragment: Fragment = .{ .start = unset, .end = unset };
-        for (bytes) |byte| {
+        for (0..bytes.len) |k| {
+            const byte = if (c.reverse) bytes[bytes.len - 1 - k] else bytes[k];
             const id = try c.b.add(.{ .byte_range = .{ .lo = byte, .hi = byte, .next = unset } });
             if (fragment.start == unset) fragment.start = id else c.b.patch(fragment.end, id);
             fragment.end = id;
@@ -540,6 +569,7 @@ const Compiler = struct {
             for (ranges, 0..) |r, i| bytes[i] = .{ @intCast(r[0]), @intCast(r[1]) };
             return c.byteClass(bytes[0..ranges.len]);
         }
+        if (c.reverse) return c.unicodeClassReversed(ranges);
         const target = try c.b.add(.{ .empty = unset });
         c.cache.clearRetainingCapacity();
         c.utf8_nodes[0] = .{};
@@ -552,6 +582,35 @@ const Compiler = struct {
         aegis.assert.invariant(c.utf8_depth == 1 and c.utf8_nodes[0].last == null, "every sequence is finished");
         const root = &c.utf8_nodes[0];
         return .{ .start = try c.utf8Compile(root.trans[0..root.n]), .end = target };
+    }
+
+    /// Reversed, each sequence's ranges are read last first: a chain from its last range back to
+    /// the target, built from the target out, each state shared with an equal one made before
+    /// (the same range to the same state), and the class the chains' heads as alternatives.
+    /// Heads may read the same bytes, so they are alternatives, not one state's transitions; no
+    /// way is preferred, since only which strings match counts here.
+    fn unicodeClassReversed(c: *Compiler, ranges: []const [2]u21) BuildError!Fragment {
+        const target = try c.b.add(.{ .empty = unset });
+        c.chains.clearRetainingCapacity();
+        c.heads.clearRetainingCapacity();
+        for (ranges) |r| {
+            var sequences: utf8.Sequences = .init(r[0], r[1]);
+            while (sequences.next()) |sequence| {
+                var next = target;
+                for (sequence.slice()) |range| {
+                    const key: Trans = .{ .lo = range.lo, .hi = range.hi, .next = next };
+                    const slot = try c.chains.getOrPut(c.b.gpa, key);
+                    if (!slot.found_existing) slot.value_ptr.* = try c.b.add(.{ .byte_range = key });
+                    next = slot.value_ptr.*;
+                }
+                // Sequences are apart, so no two chains are equal and no head comes twice.
+                try c.heads.append(c.b.gpa, next);
+            }
+        }
+        if (c.heads.items.len == 1) return .{ .start = c.heads.items[0], .end = target };
+        const start = try c.b.addUnion(c.heads.items.len, false);
+        for (c.heads.items) |head| c.b.patch(start, head);
+        return .{ .start = start, .end = target };
     }
 
     fn utf8Add(c: *Compiler, ranges: []const utf8.Range, target: u32) BuildError!void {
