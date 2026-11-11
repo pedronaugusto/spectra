@@ -27,5 +27,8 @@ backtrack: aegis.units.Bytes(usize) = .literal("256KiB"),
 /// The one-pass DFA's table, built at compile and kept in the `Regex`: a pattern whose table is
 /// larger has none, and its captures are the backtracker's or the PikeVM's.
 onepass: aegis.units.Bytes(usize) = .literal("1MiB"),
+/// A prefilter's table (Aho-Corasick over many literals), built at compile and kept in the
+/// `Regex`: a pattern whose table is larger has none.
+prefilter: aegis.units.Bytes(usize) = .literal("1MiB"),
 /// The largest dense DFA built ahead.
 dense_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),

@@ -778,15 +778,16 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
     defer state.deinit();
     const a = state.allocator();
     // Literals over a small alphabet, so they occur; a rare byte among them, so a prefilter is chosen.
-    const alphabet_ = "ab\x00\x01z";
+    const alphabet_ = "abc\x00\x01xyz";
     var lits: std.ArrayList([]const u8) = .empty;
-    for (0..shakedown.gen.intRange(s, usize, 1, 3)) |_| {
+    for (0..shakedown.gen.intRange(s, usize, 1, 8)) |_| {
         const lit = try a.alloc(u8, shakedown.gen.intRange(s, usize, 1, 5));
         for (lit) |*b| b.* = alphabet_[shakedown.gen.intRange(s, usize, 0, alphabet_.len - 1)];
         try lits.append(a, lit);
     }
     const seq = try literals.Seq.exactOf(a, lits.items);
-    const p = prefilter.choose(&seq) orelse return;
+    var p = try prefilter.choose(case.gpa, &seq, 1 << 20) orelse return;
+    defer p.deinit(case.gpa);
     const h = try a.alloc(u8, shakedown.gen.intRange(s, usize, 0, 80));
     for (h) |*b| b.* = alphabet_[shakedown.gen.intRange(s, usize, 0, alphabet_.len - 1)];
     const start = shakedown.gen.intRange(s, usize, 0, h.len);
@@ -800,7 +801,7 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
             want = at;
             break :scan;
         },
-        .pair => if (at + lit.len <= end and std.mem.eql(u8, h[at..][0..lit.len], lit)) {
+        .pair, .aho => if (at + lit.len <= end and std.mem.eql(u8, h[at..][0..lit.len], lit)) {
             want = at;
             break :scan;
         },
@@ -809,12 +810,13 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
     reached_prefilter[@intFromEnum(p)] += 1;
 }
 
-var reached_prefilter: [2]usize = .{ 0, 0 };
+var reached_prefilter: [3]usize = .{ 0, 0, 0 };
 
 test "fuzz: a prefilter finds the first place a literal starts, as a plain scan does" {
-    reached_prefilter = .{ 0, 0 };
-    try shakedown.check(gpa, {}, anyPrefilter, .{ .cases = 4000, .seed = 0x9fe });
-    try testing.expect(reached_prefilter[0] > 300 and reached_prefilter[1] > 300);
+    reached_prefilter = .{ 0, 0, 0 };
+    try shakedown.check(gpa, {}, anyPrefilter, .{ .cases = 6000, .seed = 0x9fe });
+    errdefer std.debug.print("{any}\n", .{reached_prefilter});
+    try testing.expect(reached_prefilter[0] > 300 and reached_prefilter[1] > 300 and reached_prefilter[2] > 300);
 }
 
 test "a prefilter skips what cannot start a match, the literal strategy answers alone, and one that stops every few bytes is set aside" {
@@ -853,6 +855,15 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
         try testing.expectEqual(case.want, lit.find(&lit_cache, .of(case.haystack)));
         try testing.expectEqual(case.want != null, lit.isMatch(&lit_cache, case.haystack));
     }
+    // Many literals: Aho-Corasick finds where one starts.
+    var many = try compiled("(?:apple|banana|cherry|damson|elder)\\d", .{});
+    defer many.deinit();
+    try testing.expect(many.prefilter.? == .aho);
+    var many_cache = try many.cache(gpa);
+    defer many_cache.deinit(gpa);
+    const fruit = try std.mem.concat(a, u8, &.{ try repeatText(a, "a quiet line of text. ", 500), "cherry7" });
+    try testing.expectEqual(Regex.Span{ .start = fruit.len - 7, .end = fruit.len }, many.find(&many_cache, .of(fruit)).?);
+    try testing.expect(many_cache.lazy.?.skipped >= fruit.len - 7 - 64);
     // `\x00y` over zeros: a candidate at every byte, so after sixteen it is set aside.
     var zeros = try compiled("(?-u:\\x00)y", .{});
     defer zeros.deinit();

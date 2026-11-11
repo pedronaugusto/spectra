@@ -99,8 +99,9 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         return error.TooLarge;
     }
     const prefixes = try (literals_mod.Extractor{}).extract(a, &hir);
-    const prefilter = if (options.prefilter) prefilter_mod.choose(&prefixes) else null;
-    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and literalAlone(&nfa, &prefixes));
+    var prefilter = if (options.prefilter) try prefilter_mod.choose(gpa, &prefixes, options.limits.prefilter.raw()) else null;
+    errdefer if (prefilter) |*p| p.deinit(gpa);
+    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and prefilter.?.exactLen() != null and literalAlone(&nfa, &prefixes));
     return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter };
 }
 
@@ -174,6 +175,7 @@ pub fn deinit(re: *Regex) void {
     re.nfa.deinit(re.gpa);
     if (re.reverse) |*r| r.nfa.deinit(re.gpa);
     if (re.onepass) |*d| d.deinit(re.gpa);
+    if (re.prefilter) |*p| p.deinit(re.gpa);
     re.* = undefined;
 }
 

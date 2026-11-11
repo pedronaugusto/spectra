@@ -324,7 +324,7 @@ test "regex's own test suite, through the Rust dialect" {
         // by the prefilter alone; elsewhere the prefilter skips ahead for the lazy DFA.
         .path_reverse_anchored = 85,
         .path_literal = 110,
-        .prefiltered = 87,
+        .prefiltered = 112,
         // Each match's start: the reverse lazy DFA's where the lazy DFA found its end, else the
         // PikeVM's (the PikeVM's own run, and the searches the lazy DFA quit).
         .no_reverse_dfa = 0,

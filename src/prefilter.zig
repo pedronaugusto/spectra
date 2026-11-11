@@ -1,9 +1,14 @@
 //! Prefilters: a fast scan for where a match may start, from the literals every match starts
-//! with (hir/literals.zig), so the lazy DFA skips what cannot start one. regex-automata's in
-//! their first forms: memchr for the one to three bytes every literal starts with, and for a
-//! single literal a search on its two rarest bytes (by `rank`) confirmed by the whole literal.
-//! Both scan sixteen bytes a step in vectors that every target's baseline has (SSE2, NEON, or
-//! Zig's lowering elsewhere), with no run-time check.
+//! with (hir/literals.zig), so the lazy DFA skips what cannot start one. regex-automata's:
+//! memchr for the one to three bytes every literal starts with, and for a single literal a
+//! search on its two rarest bytes (by `rank`) confirmed by the whole literal, both sixteen bytes
+//! a step in vectors that every target's baseline has (SSE2, NEON, or Zig's lowering elsewhere),
+//! with no run-time check; and for more literals Aho-Corasick, a DFA over the literals' byte
+//! classes whose every state knows the longest literal ending there.
+//!
+//! Aho-Corasick finds literals by where they end, and the prefilter wants the leftmost start:
+//! it keeps the earliest start seen and reads on until no literal starting before it could
+//! still end, at most the longest literal's length past it.
 //!
 //! A prefilter is chosen only where it can say no: every literal nonempty, so a match can only
 //! start where a literal does. A byte too common to skip much (`common`) is no prefilter.
@@ -27,6 +32,24 @@ pub const Prefilter = union(enum) {
     bytes: struct { set: [3]u8, len: u8 },
     /// One literal: its two rarest bytes at their offsets, then the whole literal confirmed.
     pair: Pair,
+    /// Any number of literals, each found whole.
+    aho: Aho,
+
+    pub fn deinit(p: *Prefilter, gpa: Allocator) void {
+        switch (p.*) {
+            .aho => |*a| a.deinit(gpa),
+            else => {},
+        }
+        p.* = undefined;
+    }
+
+    /// The bytes it holds beyond itself.
+    pub fn memory(p: *const Prefilter) usize {
+        return switch (p.*) {
+            .aho => |a| a.next.len * @sizeOf(u32) + a.longest.len,
+            else => 0,
+        };
+    }
 
     /// The first position in `haystack[start..end]` where a match may start, or null where none
     /// can: a literal starts there, and for `pair` it is there whole, within `end`.
@@ -35,6 +58,7 @@ pub const Prefilter = union(enum) {
         return switch (p.*) {
             .bytes => |b| findBytes(haystack[0..end], start, b.set[0..b.len]),
             .pair => |*pair| pair.find(haystack[0..end], start),
+            .aho => |*a| a.find(haystack[0..end], start),
         };
     }
 
@@ -43,7 +67,123 @@ pub const Prefilter = union(enum) {
         return switch (p.*) {
             .bytes => 1,
             .pair => |pair| pair.len,
+            .aho => null,
         };
+    }
+};
+
+pub const Aho = struct {
+    classes: [256]u8,
+    stride: u32,
+    /// Each state's next state by class, failures resolved: a DFA.
+    next: []u32,
+    /// The longest literal ending at each state, zero for none.
+    longest: []u8,
+    /// The longest literal.
+    max_len: u8,
+
+    fn deinit(a: *Aho, gpa: Allocator) void {
+        gpa.free(a.next);
+        gpa.free(a.longest);
+    }
+
+    fn find(a: *const Aho, haystack: []const u8, start: usize) ?usize {
+        var state: u32 = 0;
+        var best: ?usize = null;
+        var at = start;
+        while (at < haystack.len) : (at += 1) {
+            state = a.next[@as(usize, state) * a.stride + a.classes[haystack[at]]];
+            const len = a.longest[state];
+            if (len != 0) {
+                const s = at + 1 - len;
+                if (best == null or s < best.?) best = s;
+            }
+            // A literal starting before `best` ends before here.
+            if (best) |b| if (at + 1 >= b + a.max_len) return b;
+        }
+        return best;
+    }
+
+    /// The automaton of `lits`, or null where its table passes `limit` bytes.
+    fn build(gpa: Allocator, lits: []const literals.Literal, limit: usize) Allocator.Error!?Aho {
+        var a: Aho = .{ .classes = undefined, .stride = 0, .next = &.{}, .longest = &.{}, .max_len = 0 };
+        var bounds: std.StaticBitSet(257) = .empty;
+        for (lits) |lit| for (lit.bytes) |b| {
+            bounds.set(b);
+            bounds.set(@as(usize, b) + 1);
+        };
+        var class: u32 = 0;
+        for (0..256) |b| {
+            if (b > 0 and bounds.isSet(b)) class += 1;
+            a.classes[b] = @intCast(class);
+        }
+        a.stride = class + 1;
+        var nodes: usize = 1;
+        for (lits) |lit| nodes += @min(lit.bytes.len, max_literal);
+        if (nodes * (a.stride * @sizeOf(u32) + 1) > limit) return null;
+        const none = std.math.maxInt(u32);
+        var next: std.ArrayList(u32) = .empty;
+        errdefer next.deinit(gpa);
+        var longest: std.ArrayList(u8) = .empty;
+        errdefer longest.deinit(gpa);
+        try next.appendNTimes(gpa, none, a.stride);
+        try longest.append(gpa, 0);
+        // The trie.
+        for (lits) |lit| {
+            const bytes_ = lit.bytes[0..@min(lit.bytes.len, max_literal)];
+            var state: u32 = 0;
+            for (bytes_) |b| {
+                const slot = @as(usize, state) * a.stride + a.classes[b];
+                if (next.items[slot] == none) {
+                    next.items[slot] = @intCast(longest.items.len);
+                    try next.appendNTimes(gpa, none, a.stride);
+                    try longest.append(gpa, 0);
+                }
+                state = next.items[slot];
+            }
+            longest.items[state] = @max(longest.items[state], @as(u8, @intCast(bytes_.len)));
+            a.max_len = @max(a.max_len, @as(u8, @intCast(bytes_.len)));
+        }
+        // Failures, breadth first, folded into the table: a missing transition goes where the
+        // longest proper suffix's would, and a state's longest literal is its own or its
+        // failure's.
+        const states = longest.items.len;
+        const fail = try gpa.alloc(u32, states);
+        defer gpa.free(fail);
+        const queue = try gpa.alloc(u32, states);
+        defer gpa.free(queue);
+        var head: usize = 0;
+        var tail: usize = 0;
+        for (0..a.stride) |c| {
+            const t = next.items[c];
+            if (t == none) {
+                next.items[c] = 0;
+            } else {
+                fail[t] = 0;
+                queue[tail] = t;
+                tail += 1;
+            }
+        }
+        while (head < tail) : (head += 1) {
+            const s = queue[head];
+            longest.items[s] = @max(longest.items[s], longest.items[fail[s]]);
+            for (0..a.stride) |c| {
+                const slot = @as(usize, s) * a.stride + c;
+                const t = next.items[slot];
+                const via_fail = next.items[@as(usize, fail[s]) * a.stride + c];
+                if (t == none) {
+                    next.items[slot] = via_fail;
+                } else {
+                    fail[t] = via_fail;
+                    queue[tail] = t;
+                    tail += 1;
+                }
+            }
+        }
+        a.next = try next.toOwnedSlice(gpa);
+        errdefer gpa.free(a.next);
+        a.longest = try longest.toOwnedSlice(gpa);
+        return a;
     }
 };
 
@@ -94,8 +234,9 @@ fn findBytes(haystack: []const u8, start: usize, set: []const u8) ?usize {
     return null;
 }
 
-/// The prefilter for a pattern whose matches start with `prefixes`, or null where none helps.
-pub fn choose(prefixes: *const literals.Seq) ?Prefilter {
+/// The prefilter for a pattern whose matches start with `prefixes`, or null where none helps;
+/// an Aho-Corasick table is at most `limit` bytes.
+pub fn choose(gpa: Allocator, prefixes: *const literals.Seq, limit: usize) Allocator.Error!?Prefilter {
     const lits = prefixes.literals() orelse return null;
     if (lits.len == 0) return null;
     for (lits) |lit| if (lit.bytes.len == 0) return null;
@@ -105,7 +246,10 @@ pub fn choose(prefixes: *const literals.Seq) ?Prefilter {
     for (lits) |lit| {
         const b = lit.bytes[0];
         if (std.mem.indexOfScalar(u8, set[0..len], b) != null) continue;
-        if (len == 3) return null;
+        if (len == 3) {
+            const a = try Aho.build(gpa, lits, limit) orelse return null;
+            return .{ .aho = a };
+        }
         set[len] = b;
         len += 1;
     }

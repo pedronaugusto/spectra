@@ -218,8 +218,8 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .oracle_budget = 0,
         // The lazy DFA answers the rest; it quits on a byte past 0x7f where `\b` or `m`'s lines
         // read code points, and the PikeVM answers those.
-        .path_lazy_dfa = 8090,
-        .path_lazy_dfa_fell_back = 161,
+        .path_lazy_dfa = 8112,
+        .path_lazy_dfa_fell_back = 139,
         .path_reverse_anchored = 116,
         .path_literal = 1058,
         .no_lazy_dfa = 0,
