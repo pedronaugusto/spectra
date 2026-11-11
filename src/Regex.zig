@@ -29,6 +29,8 @@ const lazy = @import("lazy.zig");
 const strategy_mod = @import("strategy.zig");
 const backtrack = @import("backtrack.zig");
 const onepass_mod = @import("onepass.zig");
+const prefilter_mod = @import("prefilter.zig");
+const literals_mod = @import("hir/literals.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -48,6 +50,9 @@ backtracker: ?backtrack.Sizes,
 /// The one-pass DFA; null where the pattern is not one-pass or its table passes
 /// `Limits.onepass`.
 onepass: ?onepass_mod.Dfa,
+/// Where a match may start, from the literals every match starts with; null where none helps
+/// or `Options.prefilter` is off.
+prefilter: ?prefilter_mod.Prefilter,
 
 const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
@@ -56,6 +61,9 @@ pub const Options = struct {
     limits: Limits = .{},
     /// Where a refused pattern was refused, and why.
     diagnostic: ?*Diagnostic = null,
+    /// Whether searches skip ahead with a prefilter where the pattern's literals give one: off
+    /// only to compare the paths.
+    prefilter: bool = true,
 };
 
 pub const CompileError = error{ OutOfMemory, Invalid, Unsupported, TooLarge };
@@ -90,8 +98,21 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
-    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null);
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one };
+    const prefixes = try (literals_mod.Extractor{}).extract(a, &hir);
+    const prefilter = if (options.prefilter) prefilter_mod.choose(&prefixes) else null;
+    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and literalAlone(&nfa, &prefixes));
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter };
+}
+
+/// Whether the prefilter chosen from `prefixes` finds each match whole: the pattern asserts
+/// nothing, and its matches are one exact literal the prefilter keeps, or exact single bytes.
+fn literalAlone(nfa: *const Nfa, prefixes: *const literals_mod.Seq) bool {
+    if (nfa.looks.count() != 0) return false;
+    const lits = prefixes.literals() orelse return false;
+    for (lits) |lit| if (!lit.exact) return false;
+    if (lits.len == 1) return lits[0].bytes.len <= prefilter_mod.max_literal;
+    for (lits) |lit| if (lit.bytes.len != 1) return false;
+    return true;
 }
 
 /// The reverse automaton and its lazy DFA, or null where the automaton passes `Limits.nfa` (a
@@ -134,17 +155,19 @@ pub fn cacheBytes(re: *const Regex) usize {
 /// (`Limits.lazy_dfa`) cannot hold the fewest states a search needs; the reverse lazy DFA with
 /// it, unless its automaton passes `Limits.nfa` or its store is as short; the bounded
 /// backtracker unless `Limits.backtrack` holds no position; the one-pass DFA where the pattern
-/// is one-pass and its table fits `Limits.onepass`.
+/// is one-pass and its table fits `Limits.onepass`; a prefilter where the pattern's literals
+/// give one.
 pub const Engines = struct {
     pikevm: bool = true,
     lazy_dfa: bool,
     reverse_dfa: bool,
     backtrack: bool,
     onepass: bool,
+    prefilter: bool,
 };
 
 pub fn engines(re: *const Regex) Engines {
-    return .{ .lazy_dfa = re.dfa != null, .reverse_dfa = re.reverse != null, .backtrack = re.backtracker != null, .onepass = re.onepass != null };
+    return .{ .lazy_dfa = re.dfa != null, .reverse_dfa = re.reverse != null, .backtrack = re.backtracker != null, .onepass = re.onepass != null, .prefilter = re.prefilter != null };
 }
 
 pub fn deinit(re: *Regex) void {
@@ -178,6 +201,8 @@ pub const Cache = struct {
         /// (and the PikeVM over the match where captures were asked). Where it quits or gives
         /// up, the search goes on as `core`, and says so in its own path.
         reverse_anchored,
+        /// `Strategy.literal`: the prefilter alone.
+        literal,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -188,6 +213,8 @@ pub const Cache = struct {
         reverse_dfa,
         /// The reverse lazy DFA quit or gave up, and the PikeVM found it.
         reverse_dfa_fell_back,
+        /// The prefilter, which found the match whole.
+        prefilter,
     };
 
     pub const Slots = enum {
@@ -231,7 +258,7 @@ fn narrowed(re: *const Regex, c: *Cache, input: Input) ?Input {
         return input;
     };
     var from: usize = undefined;
-    const found = lazy.searchFrom(&re.nfa, d, &c.lazy.?, input, &from) catch {
+    const found = lazy.searchFrom(&re.nfa, d, &c.lazy.?, input, &from, if (re.prefilter) |*p| p else null) catch {
         c.last = .lazy_dfa_fell_back;
         return input;
     };
@@ -269,6 +296,14 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     if (c.reverse) |*r| r.visited = 0;
     if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
+    if (re.strategy == .literal) {
+        const p = &re.prefilter.?;
+        c.last = .literal;
+        c.last_start = .prefilter;
+        const at = p.find(input.haystack, input.span.start, input.span.end) orelse return .none;
+        if (input.anchored and at != input.span.start) return .none;
+        return .{ .span = .{ .start = at, .end = at + p.exactLen().? } };
+    }
     if (re.strategy == .reverse_anchored) {
         const r = &re.reverse.?;
         if (strategy_mod.reverseAnchored(&r.nfa, &r.dfa, &c.reverse.?, input)) |found| {
@@ -291,7 +326,7 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
 
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
     var input: Input = .of(haystack);
-    if (re.strategy == .reverse_anchored) return re.find(c, input) != null;
+    if (re.strategy == .reverse_anchored or re.strategy == .literal) return re.find(c, input) != null;
     input.earliest = true;
     c.pike.visited = 0;
     const cut = re.narrowed(c, input) orelse return false;

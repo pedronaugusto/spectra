@@ -21,10 +21,16 @@ pub const Strategy = enum {
     /// Nothing reads forward, so a search reads the tail its match needs, not the haystack. On
     /// a quit or a give-up, `core`.
     reverse_anchored,
+    /// Every match is one literal the prefilter confirms whole (one literal, or single bytes)
+    /// and the pattern asserts nothing: the prefilter alone finds the match, the leftmost
+    /// literal's.
+    literal,
 };
 
-/// The strategy for a pattern of automaton `nfa` with the lazy DFAs it has.
-pub fn choose(nfa: *const Nfa, forward: bool, reverse: bool) Strategy {
+/// The strategy for a pattern of automaton `nfa` with the lazy DFAs it has, and whether its
+/// prefilter finds its matches whole.
+pub fn choose(nfa: *const Nfa, forward: bool, reverse: bool, literal: bool) Strategy {
+    if (literal) return .literal;
     if (!forward) return .pikevm;
     const anchored = nfa.start_anchored == nfa.start_unanchored;
     if (reverse and nfa.end_anchored and !anchored) return .reverse_anchored;

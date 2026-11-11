@@ -31,6 +31,12 @@
 //! 0x7f quit as forward. The reverse automaton has no empty checks, and its lazy DFA no bits:
 //! compile.zig says why the strings are the same.
 //!
+//! A prefilter (prefilter.zig), where the pattern has one, runs wherever an unanchored forward
+//! search is back in its start state with no match yet: it skips to the next position a match
+//! may start, or ends the search where none can. A prefilter whose candidates come every few
+//! bytes (fewer than 4 skipped on average over 16) is set aside for the rest of the search: the
+//! automaton reads faster than it stops and starts.
+//!
 //! The cache has a fixed capacity, allocated once, and is cleared when full; the state being
 //! left is kept across the clear. A pattern whose DFA outgrows the capacity would clear on
 //! almost every byte, so after three clears a search that read fewer than ten bytes per state
@@ -47,6 +53,7 @@ const LookSet = Nfa.LookSet;
 const look_zig = @import("nfa/look.zig");
 const pikevm = @import("pikevm.zig");
 const SparseSet = @import("SparseSet.zig");
+const Prefilter = @import("prefilter.zig").Prefilter;
 const Key = SparseSet.Key;
 
 pub const Input = pikevm.Input;
@@ -93,6 +100,8 @@ const returns: LookSet = .initMany(&.{ .start_line_crlf, .end_line_crlf, .start_
 /// to the assertions, and how its cache divides. Immutable; every state lives in a `Cache`.
 pub const Dfa = struct {
     direction: Direction,
+    /// The unanchored start's automaton state: the seeds of a state back at the start.
+    restart: Key,
     /// Each byte's class: bytes that no transition and no assertion tells apart.
     classes: [256]u8,
     /// A row's length: the classes, and the haystack's end.
@@ -129,6 +138,7 @@ pub const Dfa = struct {
 pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction) ?Dfa {
     var d: Dfa = undefined;
     d.direction = direction;
+    d.restart = nfa.start_unanchored.raw();
     const quit = nfa.looks.intersectWith(wide).count() > 0;
     const word = nfa.looks.intersectWith(words).count() > 0;
     const lf = nfa.looks.intersectWith(lines).count() > 0;
@@ -222,6 +232,8 @@ const Rec = struct {
     hash: u32,
     context: Context,
     match: bool,
+    /// Its seeds are the unanchored start alone: where a prefilter may skip ahead.
+    restart: bool,
 };
 
 const Explore = struct { id: Nfa.StateId, read: bool };
@@ -254,6 +266,9 @@ pub const Cache = struct {
     built_since: usize = 0,
     /// The last search's work: bytes read and threads entered building transitions.
     visited: usize = 0,
+    /// The last search's prefilter: positions it skipped to, and bytes it skipped.
+    candidates: usize = 0,
+    skipped: usize = 0,
 
     /// Allocates what `d.bytes()` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, d: *const Dfa) Allocator.Error!Cache {
@@ -295,7 +310,7 @@ pub const Cache = struct {
         c.keys_len = 0;
         @memset(c.table, 0);
         @memset(&c.starts, unknown);
-        c.recs[dead] = .{ .start = 0, .len = 0, .hash = 0, .context = .other, .match = false };
+        c.recs[dead] = .{ .start = 0, .len = 0, .hash = 0, .context = .other, .match = false, .restart = false };
         @memset(c.rows[0..d.stride], dead);
     }
 
@@ -328,7 +343,7 @@ pub const Cache = struct {
         const id = c.len;
         c.len += 1;
         @memcpy(c.keys[c.keys_len..][0..keys.len], keys);
-        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(keys.len), .hash = h, .context = context, .match = match };
+        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(keys.len), .hash = h, .context = context, .match = match, .restart = keys.len == 1 and keys[0] == d.restart };
         c.keys_len += @intCast(keys.len);
         @memset(c.rows[@as(usize, id) * d.stride ..][0..d.stride], unknown);
         const mask = d.slots - 1;
@@ -360,25 +375,28 @@ fn hashOf(context: Context, match: bool, keys: []const Key) u32 {
 /// in UTF-8, an empty match that would split a code point is passed over, as the PikeVM does.
 pub fn search(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
     var from: usize = undefined;
-    return searchFrom(nfa, d, c, input, &from);
+    return searchFrom(nfa, d, c, input, &from, null);
 }
 
 /// `search`, and in `from` where the search that found it began: the span's start, or past it
-/// where an empty match split a code point. The match is the leftmost-first from there.
-pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from: *usize) Error!?usize {
+/// where an empty match split a code point. The match is the leftmost-first from there. With
+/// `pre`, the pattern's prefilter skips to where a match may start.
+pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from: *usize, pre: ?*const Prefilter) Error!?usize {
     aegis.assert.invariant(d.direction == .forward, "a forward search reads a forward lazy DFA");
     aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
     aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
     c.visited = 0;
+    c.candidates = 0;
+    c.skipped = 0;
     from.* = input.span.start;
-    var end = try searchOnce(nfa, d, c, input) orelse return null;
+    var end = try searchOnce(nfa, d, c, input, pre) orelse return null;
     if (!(nfa.utf8 and nfa.empty_ok)) return end;
     var again = input;
     while (!pikevm.isBoundary(input.haystack, end)) {
         if (input.anchored) return null;
         again.span.start += 1;
         from.* = again.span.start;
-        end = try searchOnce(nfa, d, c, again) orelse return null;
+        end = try searchOnce(nfa, d, c, again, pre) orelse return null;
     }
     return end;
 }
@@ -420,14 +438,32 @@ pub fn searchReverse(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Er
     return found;
 }
 
-fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
+fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*const Prefilter) Error!?usize {
     if (input.span.start > input.span.end) return null;
     const anchored = input.anchored or nfa.start_anchored == nfa.start_unanchored;
     var s = try startState(nfa, d, c, input, anchored);
     var found: ?usize = null;
     var at = input.span.start;
+    // Anchored, the start is where the match is: nothing to skip to.
+    var prefilter = if (anchored) null else pre;
+    var tries: usize = 0;
+    var skipped: usize = 0;
     while (at < input.span.end) : (at += 1) {
         if (s == dead) return found;
+        if (prefilter) |p| if (found == null and c.recs[s].restart) {
+            const next_at = p.find(input.haystack, at, input.span.end) orelse return null;
+            tries += 1;
+            skipped += next_at - at;
+            c.candidates += 1;
+            c.skipped += next_at - at;
+            if (next_at > at) {
+                at = next_at;
+                const before = input.haystack[at - 1];
+                if (d.quit != null and before >= 0x80) return error.Quit;
+                s = try startOf(nfa, d, c, d.kinds[before], false);
+            }
+            if (tries >= 16 and skipped < 4 * tries) prefilter = null;
+        };
         const byte = input.haystack[at];
         const class = d.classes[byte];
         if (d.quit == class) return error.Quit;

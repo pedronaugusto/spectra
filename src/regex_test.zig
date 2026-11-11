@@ -285,7 +285,7 @@ fn anyLazy(_: void, case: *shakedown.Case) !void {
         var slots: [2]?usize = undefined;
         const want = pikevm.search(&re.nfa, &cache.pike, input, &slots);
         var from: usize = undefined;
-        if (lazy.searchFrom(&re.nfa, d, &cache.lazy.?, input, &from)) |got| {
+        if (lazy.searchFrom(&re.nfa, d, &cache.lazy.?, input, &from, if (re.prefilter) |*p| p else null)) |got| {
             try testing.expectEqual(want, got);
             reached.answered += 1;
             if (re.nfa.loop_checks) reached.checked += 1;
@@ -438,7 +438,7 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     const pattern = "(a|b)*a(a|b){20}";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) } });
+    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
     defer alone.deinit();
     try testing.expect(re.engines().lazy_dfa and !alone.engines().lazy_dfa);
     var alone_cache = try alone.cache(gpa);
@@ -472,7 +472,7 @@ test "a reverse lazy DFA that gives up leaves the start to the PikeVM, over the 
     const pattern = "(a|b){20}a(a|b)*";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true, .prefilter = true }, re.engines());
     const big = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(big);
     var prng: std.Random.DefaultPrng = .init(0x7e5e);
@@ -508,7 +508,8 @@ test "the reverse lazy DFA finds where the leftmost-first match starts, with eac
         .{ .pattern = "(a*)*b", .syntax = ecma, .haystack = "cb", .want = .{ .start = 1, .end = 2 } },
     };
     for (cases) |case| {
-        var re = try compiled(case.pattern, case.syntax);
+        // No prefilter: a literal pattern would be the prefilter's alone.
+        var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = case.syntax, .prefilter = false });
         defer re.deinit();
         var cache = try re.cache(gpa);
         defer cache.deinit(gpa);
@@ -524,7 +525,8 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
         .{ .pattern = "^b", .syntax = .{ .dialect = .ecmascript, .multi_line = true }, .ascii = "a\nb", .wide = "a\u{2028}b", .want = .{ .{ .start = 2, .end = 3 }, .{ .start = 4, .end = 5 } } },
     };
     for (cases) |case| {
-        var re = try compiled(case.pattern, case.syntax);
+        // No prefilter: it would skip to the candidate past the wide byte, and nothing would quit.
+        var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = case.syntax, .prefilter = false });
         defer re.deinit();
         var cache = try re.cache(gpa);
         defer cache.deinit(gpa);
@@ -545,14 +547,14 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
 test "a store too small for the fewest states leaves the pattern no lazy DFA, and says so" {
     var re = try Regex.compile(gpa, .init("a+b"), .{ .limits = .{ .lazy_dfa = .fromRaw(64) } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true, .onepass = true }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true, .onepass = true, .prefilter = false }, re.engines());
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     try testing.expectEqual(Regex.Span{ .start = 1, .end = 4 }, re.find(&cache, .of("xaab")).?);
     try testing.expectEqual(.pikevm, cache.last);
     var roomy = try Regex.compile(gpa, .init("a+b"), .{});
     defer roomy.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true }, roomy.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true, .prefilter = false }, roomy.engines());
 }
 
 // Every match in turn, counted.
@@ -763,4 +765,101 @@ test "a one-pass pattern's captures follow one path; a pattern where a byte lead
     try testing.expect(re.captures(&cache, .of("id: abc-123!"), &groups));
     try testing.expectEqual(.onepass, cache.last_slots);
     try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = 4, .end = 11 }, .{ .start = 4, .end = 7 }, .{ .start = 8, .end = 11 } }, &groups);
+}
+
+// The prefilters.
+
+const prefilter = @import("prefilter.zig");
+const literals = @import("hir/literals.zig");
+
+fn anyPrefilter(_: void, case: *shakedown.Case) !void {
+    const s = case.source;
+    var state: std.heap.ArenaAllocator = .init(case.gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    // Literals over a small alphabet, so they occur; a rare byte among them, so a prefilter is chosen.
+    const alphabet_ = "ab\x00\x01z";
+    var lits: std.ArrayList([]const u8) = .empty;
+    for (0..shakedown.gen.intRange(s, usize, 1, 3)) |_| {
+        const lit = try a.alloc(u8, shakedown.gen.intRange(s, usize, 1, 5));
+        for (lit) |*b| b.* = alphabet_[shakedown.gen.intRange(s, usize, 0, alphabet_.len - 1)];
+        try lits.append(a, lit);
+    }
+    const seq = try literals.Seq.exactOf(a, lits.items);
+    const p = prefilter.choose(&seq) orelse return;
+    const h = try a.alloc(u8, shakedown.gen.intRange(s, usize, 0, 80));
+    for (h) |*b| b.* = alphabet_[shakedown.gen.intRange(s, usize, 0, alphabet_.len - 1)];
+    const start = shakedown.gen.intRange(s, usize, 0, h.len);
+    const end = shakedown.gen.intRange(s, usize, start, h.len);
+    case.note("{any} in {any} [{d}, {d})", .{ lits.items, h, start, end });
+    // A plain scan: the first position where a literal starts (bytes) or is whole (pair).
+    var want: ?usize = null;
+    var at = start;
+    scan: while (at < end) : (at += 1) for (lits.items) |lit| switch (p) {
+        .bytes => if (h[at] == lit[0]) {
+            want = at;
+            break :scan;
+        },
+        .pair => if (at + lit.len <= end and std.mem.eql(u8, h[at..][0..lit.len], lit)) {
+            want = at;
+            break :scan;
+        },
+    };
+    try testing.expectEqual(want, p.find(h, start, end));
+    reached_prefilter[@intFromEnum(p)] += 1;
+}
+
+var reached_prefilter: [2]usize = .{ 0, 0 };
+
+test "fuzz: a prefilter finds the first place a literal starts, as a plain scan does" {
+    reached_prefilter = .{ 0, 0 };
+    try shakedown.check(gpa, {}, anyPrefilter, .{ .cases = 4000, .seed = 0x9fe });
+    try testing.expect(reached_prefilter[0] > 300 and reached_prefilter[1] > 300);
+}
+
+test "a prefilter skips what cannot start a match, the literal strategy answers alone, and one that stops every few bytes is set aside" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // `needle\d+` over text: the lazy DFA reads a few bytes per candidate, not the haystack.
+    const h = try std.mem.concat(a, u8, &.{ try repeatText(a, "a quiet line of text, no match here. ", 400), "needle42" });
+    var re = try compiled("needle\\d+", .{});
+    defer re.deinit();
+    try testing.expect(re.engines().prefilter);
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    try testing.expectEqual(Regex.Span{ .start = h.len - 8, .end = h.len }, re.find(&cache, .of(h)).?);
+    try testing.expectEqual(.lazy_dfa, cache.last);
+    try testing.expect(cache.lazy.?.candidates >= 1 and cache.lazy.?.skipped >= h.len - 8 - 64);
+    var off = try Regex.compile(gpa, .init("needle\\d+"), .{ .prefilter = false });
+    defer off.deinit();
+    var off_cache = try off.cache(gpa);
+    defer off_cache.deinit(gpa);
+    try testing.expectEqual(re.find(&cache, .of(h)), off.find(&off_cache, .of(h)));
+    try testing.expect(cache.lazy.?.visited * 10 < off_cache.lazy.?.visited);
+    // A literal, and single bytes: the prefilter alone, the leftmost one's.
+    for ([_]struct { pattern: []const u8, haystack: []const u8, want: ?Regex.Span }{
+        .{ .pattern = "needle", .haystack = "hay needle hay", .want = .{ .start = 4, .end = 10 } },
+        .{ .pattern = "(needle)", .haystack = "hay needle", .want = .{ .start = 4, .end = 10 } },
+        .{ .pattern = "x|y|z", .haystack = "abzyx", .want = .{ .start = 2, .end = 3 } },
+        .{ .pattern = "needle", .haystack = "hay", .want = null },
+    }) |case| {
+        var lit = try compiled(case.pattern, .{});
+        defer lit.deinit();
+        var lit_cache = try lit.cache(gpa);
+        defer lit_cache.deinit(gpa);
+        const Strategy = @import("strategy.zig").Strategy;
+        try testing.expectEqual(Strategy.literal, lit.strategy);
+        try testing.expectEqual(case.want, lit.find(&lit_cache, .of(case.haystack)));
+        try testing.expectEqual(case.want != null, lit.isMatch(&lit_cache, case.haystack));
+    }
+    // `\x00y` over zeros: a candidate at every byte, so after sixteen it is set aside.
+    var zeros = try compiled("(?-u:\\x00)y", .{});
+    defer zeros.deinit();
+    var zeros_cache = try zeros.cache(gpa);
+    defer zeros_cache.deinit(gpa);
+    const z = try a.alloc(u8, 4096);
+    @memset(z, 0);
+    try testing.expectEqual(null, zeros.find(&zeros_cache, .of(z)));
+    try testing.expect(zeros_cache.lazy.?.candidates <= 16);
 }

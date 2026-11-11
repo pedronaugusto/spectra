@@ -60,12 +60,14 @@ const Tally = struct {
     path_lazy_dfa: usize = 0,
     path_lazy_dfa_fell_back: usize = 0,
     path_reverse_anchored: usize = 0,
+    path_literal: usize = 0,
     no_lazy_dfa: usize = 0,
     /// Each case's match found again by `find`, its start each way (`Regex.Cache.Start`), and
     /// the same span as the captures' group 0.
     start_reverse_dfa: usize = 0,
     start_reverse_dfa_fell_back: usize = 0,
     start_pikevm: usize = 0,
+    start_prefilter: usize = 0,
     no_reverse_dfa: usize = 0,
     /// Which engine wrote each case's captures (`Regex.Cache.Slots`).
     slots_backtrack: usize = 0,
@@ -130,9 +132,9 @@ test "V8's verdicts, through the ECMAScript dialect" {
             errdefer re.deinit();
             if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
             if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) } });
+            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
             errdefer alone.deinit();
-            try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack and !alone.engines().onepass);
+            try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack and !alone.engines().onepass and !alone.engines().prefilter);
             const ast = try a.create(@import("syntax/Ast.zig"));
             ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
             const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
@@ -155,6 +157,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .lazy_dfa => tally.path_lazy_dfa += 1,
             .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
             .reverse_anchored => tally.path_reverse_anchored += 1,
+            .literal => tally.path_literal += 1,
         }
         const span = re.find(cache, .of(case.haystack));
         if (found != (span != null) or (found and !std.meta.eql(groups[0].?, span.?))) {
@@ -165,6 +168,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .pikevm => tally.start_pikevm += 1,
             .reverse_dfa => tally.start_reverse_dfa += 1,
             .reverse_dfa_fell_back => tally.start_reverse_dfa_fell_back += 1,
+            .prefilter => tally.start_prefilter += 1,
         };
         const alone_groups = try a.alloc(?Regex.Span, re.captureCount());
         if (held.?.alone.captures(&held.?.alone_cache, .of(case.haystack), alone_groups) != found or (found and !std.meta.eql(groups, alone_groups) and !spansEqlBoth(groups, alone_groups))) {
@@ -214,15 +218,17 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .oracle_budget = 0,
         // The lazy DFA answers the rest; it quits on a byte past 0x7f where `\b` or `m`'s lines
         // read code points, and the PikeVM answers those.
-        .path_lazy_dfa = 9082,
-        .path_lazy_dfa_fell_back = 227,
+        .path_lazy_dfa = 8090,
+        .path_lazy_dfa_fell_back = 161,
         .path_reverse_anchored = 116,
+        .path_literal = 1058,
         .no_lazy_dfa = 0,
         // `find` says what the captures' group 0 says on every case; the reverse lazy DFA finds
         // each start where the lazy DFA found the end, through ECMAScript's empty checks forward.
-        .start_reverse_dfa = 3201,
+        .start_reverse_dfa = 3081,
         .start_reverse_dfa_fell_back = 0,
         .start_pikevm = 40,
+        .start_prefilter = 120,
         .no_reverse_dfa = 0,
         // Every case's captures are the one-pass DFA's or the backtracker's, the PikeVM alone
         // saying the same.

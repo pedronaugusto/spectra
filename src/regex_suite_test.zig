@@ -44,12 +44,16 @@ const Tally = struct {
     path_lazy_dfa: usize = 0,
     path_lazy_dfa_fell_back: usize = 0,
     path_reverse_anchored: usize = 0,
+    path_literal: usize = 0,
+    /// Searches where the lazy DFA's prefilter skipped ahead.
+    prefiltered: usize = 0,
     /// Patterns with a lazy DFA but no reverse one.
     no_reverse_dfa: usize = 0,
     /// Matches found whose start each way found (`Regex.Cache.Start`).
     start_pikevm: usize = 0,
     start_reverse_dfa: usize = 0,
     start_reverse_dfa_fell_back: usize = 0,
+    start_prefilter: usize = 0,
     /// Captures found, by the engine that wrote them (`Regex.Cache.Slots`).
     slots_pikevm: usize = 0,
     slots_backtrack: usize = 0,
@@ -61,6 +65,7 @@ const Tally = struct {
             .pikevm => tally.start_pikevm += 1,
             .reverse_dfa => tally.start_reverse_dfa += 1,
             .reverse_dfa_fell_back => tally.start_reverse_dfa_fell_back += 1,
+            .prefilter => tally.start_prefilter += 1,
         }
     }
 
@@ -70,6 +75,7 @@ const Tally = struct {
             .lazy_dfa => tally.path_lazy_dfa += 1,
             .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
             .reverse_anchored => tally.path_reverse_anchored += 1,
+            .literal => tally.path_literal += 1,
         }
     }
 };
@@ -196,7 +202,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         limits.backtrack = .fromRaw(0);
         limits.onepass = .fromRaw(0);
     }
-    var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d }) catch |err| {
+    var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d, .prefilter = engines != .pikevm }) catch |err| {
         if (flag(t, "compiles", true)) {
             std.debug.print("{s}/{s}: /{s}/ refused: {t} {t}\n", .{ file, name, pattern, err, d.reason });
             tally.failed += 1;
@@ -209,7 +215,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
         if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
         if (re.engines().lazy_dfa and !re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa or re.engines().backtrack or re.engines().onepass) {
+    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa or re.engines().backtrack or re.engines().onepass or re.engines().prefilter) {
         std.debug.print("{s}/{s}: /{s}/ has a lazy DFA in no store\n", .{ file, name, pattern });
         tally.failed += 1;
         return false;
@@ -243,6 +249,9 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     while (k < limit) : (k += 1) {
         const found = it.next();
         tally.count(cache.last);
+        if (cache.lazy) |l| if (l.candidates > 0) {
+            tally.prefiltered += 1;
+        };
         const m = found orelse break;
         tally.countStart(cache.last_start);
         if (k >= want.matches.len or !std.meta.eql(want.matches[k][0], @as(?Span, m))) {
@@ -309,16 +318,20 @@ test "regex's own test suite, through the Rust dialect" {
         // past 0x7f where a Unicode `\b` reads code points, the PikeVM answering those.
         .no_lazy_dfa = 0,
         .path_pikevm = 4531,
-        .path_lazy_dfa = 4297,
-        .path_lazy_dfa_fell_back = 149,
-        // A pattern whose every match ends at the end is read back from there alone.
+        .path_lazy_dfa = 4189,
+        .path_lazy_dfa_fell_back = 147,
+        // A pattern whose every match ends at the end is read back from there alone; a literal,
+        // by the prefilter alone; elsewhere the prefilter skips ahead for the lazy DFA.
         .path_reverse_anchored = 85,
+        .path_literal = 110,
+        .prefiltered = 87,
         // Each match's start: the reverse lazy DFA's where the lazy DFA found its end, else the
         // PikeVM's (the PikeVM's own run, and the searches the lazy DFA quit).
         .no_reverse_dfa = 0,
         .start_pikevm = 1567,
-        .start_reverse_dfa = 1489,
+        .start_reverse_dfa = 1448,
         .start_reverse_dfa_fell_back = 0,
+        .start_prefilter = 41,
         // Captures: the backtracker's on the default path, the PikeVM's on its own.
         .slots_pikevm = 1528,
         .slots_backtrack = 609,
