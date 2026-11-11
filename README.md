@@ -21,3 +21,5 @@ lookahead by derivatives, then sets, dense DFAs and the build step. Nothing is r
 ## License
 
 MIT.
+
+src/hir/suffix.zig includes code translated from the Rust regex project (MIT OR Apache-2.0); see LICENSES/.

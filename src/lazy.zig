@@ -404,6 +404,21 @@ pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from:
 /// Reversed: where the match ending at `input.span.end` that starts earliest begins, no earlier
 /// than `input.span.start`, or null where none ends there. `nfa` is the reverse automaton.
 pub fn searchReverse(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
+    return searchReverseLimited(nfa, d, c, input, input.span.start) catch |err| switch (err) {
+        error.Quadratic => unreachable,
+        else => |e| e,
+    };
+}
+
+pub const LimitedError = Error || error{
+    /// The scan would read back past the limit while a match could still start further back.
+    Quadratic,
+};
+
+/// `searchReverse`, refusing to read back past `min_start` (`error.Quadratic`): a caller that
+/// reads back from one candidate after another passes the last one's end, so no byte is read
+/// back twice and the work stays linear.
+pub fn searchReverseLimited(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, min_start: usize) LimitedError!?usize {
     aegis.assert.invariant(d.direction == .reverse, "a reverse search reads a reverse lazy DFA");
     aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
     aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
@@ -418,7 +433,9 @@ pub fn searchReverse(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Er
     var found: ?usize = null;
     var at = input.span.end;
     while (at > input.span.start) : (at -= 1) {
-        if (s == dead) return found;
+        // A state with no seeds leads nowhere: the match it holds, if any, is the last.
+        if (s == dead or c.recs[s].len == 0) return found;
+        if (at <= min_start) return error.Quadratic;
         const class = d.classes[h[at - 1]];
         if (d.quit == class) return error.Quit;
         c.visited += 1;

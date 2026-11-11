@@ -31,6 +31,7 @@ const backtrack = @import("backtrack.zig");
 const onepass_mod = @import("onepass.zig");
 const prefilter_mod = @import("prefilter.zig");
 const literals_mod = @import("hir/literals.zig");
+const suffix_mod = @import("hir/suffix.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -53,6 +54,10 @@ onepass: ?onepass_mod.Dfa,
 /// Where a match may start, from the literals every match starts with; null where none helps
 /// or `Options.prefilter` is off.
 prefilter: ?prefilter_mod.Prefilter,
+/// The literal every match ends with and its prefilter, where `Strategy.reverse_suffix` leads.
+suffix: ?Suffix,
+
+const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
 
 const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
@@ -101,8 +106,33 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     const prefixes = try (literals_mod.Extractor{}).extract(a, &hir);
     var prefilter = if (options.prefilter) try prefilter_mod.choose(gpa, &prefixes, options.limits.prefilter.raw()) else null;
     errdefer if (prefilter) |*p| p.deinit(gpa);
-    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and prefilter.?.exactLen() != null and literalAlone(&nfa, &prefixes));
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter };
+    var suffix: ?Suffix = if (options.prefilter and prefilter == null and dfa != null and reverse != null) try suffixOf(gpa, a, &hir, options.limits.prefilter.raw()) else null;
+    errdefer if (suffix) |*s| s.prefilter.deinit(gpa);
+    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null, prefilter != null and prefilter.?.exactLen() != null and literalAlone(&nfa, &prefixes), suffix != null);
+    if (strategy != .reverse_suffix) if (suffix) |*s| {
+        s.prefilter.deinit(gpa);
+        suffix = null;
+    };
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix };
+}
+
+/// The literal every match of `hir` ends with, its longest such, with its prefilter, where
+/// hir/suffix.zig proves it may lead the search; null otherwise.
+fn suffixOf(gpa: Allocator, arena: Allocator, hir: *const Hir, limit: usize) Allocator.Error!?Suffix {
+    const seq = try (literals_mod.Extractor{ .kind = .suffix }).extract(arena, hir);
+    const lits = seq.literals() orelse return null;
+    if (lits.len == 0) return null;
+    var common = lits[0].bytes;
+    for (lits[1..]) |lit| {
+        var n: usize = 0;
+        while (n < common.len and n < lit.bytes.len and common[common.len - 1 - n] == lit.bytes[lit.bytes.len - 1 - n]) n += 1;
+        common = common[common.len - n ..];
+    }
+    if (common.len == 0 or common.len > prefilter_mod.max_literal) return null;
+    if (!try suffix_mod.leads(arena, hir, common)) return null;
+    const one = try literals_mod.Seq.singleton(arena, .{ .bytes = common, .exact = false });
+    const p = try prefilter_mod.choose(gpa, &one, limit) orelse return null;
+    return .{ .prefilter = p, .len = common.len };
 }
 
 /// Whether the prefilter chosen from `prefixes` finds each match whole: the pattern asserts
@@ -176,6 +206,7 @@ pub fn deinit(re: *Regex) void {
     if (re.reverse) |*r| r.nfa.deinit(re.gpa);
     if (re.onepass) |*d| d.deinit(re.gpa);
     if (re.prefilter) |*p| p.deinit(re.gpa);
+    if (re.suffix) |*s| s.prefilter.deinit(re.gpa);
     re.* = undefined;
 }
 
@@ -205,6 +236,9 @@ pub const Cache = struct {
         reverse_anchored,
         /// `Strategy.literal`: the prefilter alone.
         literal,
+        /// `Strategy.reverse_suffix`: the suffix's prefilter, the reverse lazy DFA from an
+        /// occurrence, and the lazy DFA anchored at the start it found.
+        reverse_suffix,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -306,6 +340,13 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
         if (input.anchored and at != input.span.start) return .none;
         return .{ .span = .{ .start = at, .end = at + p.exactLen().? } };
     }
+    if (re.strategy == .reverse_suffix and !input.anchored) {
+        if (re.reverseSuffix(c, input)) |found| {
+            c.last = .reverse_suffix;
+            c.last_start = .reverse_dfa;
+            return if (found) |span| .{ .span = span } else .none;
+        } else |_| {}
+    }
     if (re.strategy == .reverse_anchored) {
         const r = &re.reverse.?;
         if (strategy_mod.reverseAnchored(&r.nfa, &r.dfa, &c.reverse.?, input)) |found| {
@@ -326,9 +367,34 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     return .{ .search = cut };
 }
 
+/// `Strategy.reverse_suffix`'s search: occurrence by occurrence, read back from its end; at
+/// the first with a match ending there, the leftmost-first match from where the earliest
+/// starts (hir/suffix.zig says why it is the leftmost-first match).
+fn reverseSuffix(re: *const Regex, c: *Cache, input: Input) (lazy.LimitedError)!?Span {
+    const s = &re.suffix.?;
+    const r = &re.reverse.?;
+    var from = input.span.start;
+    var min_start = input.span.start;
+    while (true) {
+        const at = s.prefilter.find(input.haystack, from, input.span.end) orelse return null;
+        const end = at + s.len;
+        var back = input;
+        back.span = .{ .start = input.span.start, .end = end };
+        if (try lazy.searchReverseLimited(&r.nfa, &r.dfa, &c.reverse.?, back, min_start)) |start| {
+            var ahead = input;
+            ahead.span = .{ .start = start, .end = input.span.end };
+            ahead.anchored = true;
+            const last = try lazy.search(&re.nfa, &re.dfa.?, &c.lazy.?, ahead);
+            return .{ .start = start, .end = last orelse aegis.assert.never("a match read back from the suffix is found forward") };
+        }
+        from = at + 1;
+        min_start = end;
+    }
+}
+
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
     var input: Input = .of(haystack);
-    if (re.strategy == .reverse_anchored or re.strategy == .literal) return re.find(c, input) != null;
+    if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix) return re.find(c, input) != null;
     input.earliest = true;
     c.pike.visited = 0;
     const cut = re.narrowed(c, input) orelse return false;

@@ -25,15 +25,24 @@ pub const Strategy = enum {
     /// and the pattern asserts nothing: the prefilter alone finds the match, the leftmost
     /// literal's.
     literal,
+    /// Every match ends with one literal, the pattern has no prefilter of its own and is not
+    /// anchored at either end, and hir/suffix.zig proves the order of the literal's occurrences
+    /// is the order of the matches: the literal's prefilter finds an occurrence, the reverse
+    /// lazy DFA reads back from its end to where a match ending there starts earliest, and the
+    /// lazy DFA, anchored there, finds where the leftmost-first match ends. Reading back never
+    /// passes the end of the occurrence before (`error.Quadratic`); there, and on a quit or a
+    /// give-up, `core`.
+    reverse_suffix,
 };
 
 /// The strategy for a pattern of automaton `nfa` with the lazy DFAs it has, and whether its
 /// prefilter finds its matches whole.
-pub fn choose(nfa: *const Nfa, forward: bool, reverse: bool, literal: bool) Strategy {
+pub fn choose(nfa: *const Nfa, forward: bool, reverse: bool, literal: bool, suffix: bool) Strategy {
     if (literal) return .literal;
     if (!forward) return .pikevm;
     const anchored = nfa.start_anchored == nfa.start_unanchored;
     if (reverse and nfa.end_anchored and !anchored) return .reverse_anchored;
+    if (reverse and suffix and !anchored) return .reverse_suffix;
     return .core;
 }
 

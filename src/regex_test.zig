@@ -878,3 +878,83 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
     try testing.expectEqual(null, zeros.find(&zeros_cache, .of(z)));
     try testing.expect(zeros_cache.lazy.?.candidates <= 16);
 }
+
+// The reverse suffix strategy.
+
+test "the reverse suffix strategy leads only where the suffix's order is the matches' order" {
+    const Strategy = @import("strategy.zig").Strategy;
+    for ([_]struct { pattern: []const u8, haystack: []const u8, want: ?Regex.Span, strategy: Strategy }{
+        // An earlier-starting match can end past the first z: not taken, and the answer stands.
+        .{ .pattern = "[0-9a-q][^x]*zz|bz", .haystack = "abzz", .want = .{ .start = 0, .end = 4 }, .strategy = .core },
+        // Q's length is fixed.
+        .{ .pattern = "[A-Z][0-9]XYZ", .haystack = "a1XYZ B2XYZ", .want = .{ .start = 6, .end = 11 }, .strategy = .reverse_suffix },
+        // Q cannot read X.
+        .{ .pattern = "\\d+XYZ", .haystack = "XYZ 12XYZ", .want = .{ .start = 4, .end = 9 }, .strategy = .reverse_suffix },
+        // \\s+ ends Q and shares nothing with \\w or the suffix.
+        .{ .pattern = "\\w+\\s+Holmes", .haystack = "Mr Sherlock  Holmes", .want = .{ .start = 3, .end = 19 }, .strategy = .reverse_suffix },
+        // \\s begins Q and shares nothing with the rest.
+        .{ .pattern = "\\s[A-Za-z]{0,12}ing", .haystack = "a thing sing", .want = .{ .start = 1, .end = 7 }, .strategy = .reverse_suffix },
+        .{ .pattern = "\\d+XYZ", .haystack = "XYZ", .want = null, .strategy = .reverse_suffix },
+    }) |case| {
+        var re = try compiled(case.pattern, .{});
+        defer re.deinit();
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
+        try testing.expectEqual(case.strategy, re.strategy);
+        try testing.expectEqual(case.want, re.find(&cache, .of(case.haystack)));
+        if (case.strategy == .reverse_suffix and case.want != null) try testing.expectEqual(.reverse_suffix, cache.last);
+    }
+    // Reading back from one occurrence after another never reads a byte twice: where it would,
+    // the core strategy answers.
+    var re = try compiled("\\d+XYZ", .{});
+    defer re.deinit();
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    try testing.expectEqual(Regex.Span{ .start = 0, .end = 7 }, re.find(&cache, .of("1234XYZ")).?);
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const digits = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "1", 2000), "XYZXYZ" });
+    try testing.expectEqual(Regex.Span{ .start = 0, .end = 2003 }, re.find(&cache, .of(digits)).?);
+}
+
+fn anySuffixed(_: void, case: *shakedown.Case) !void {
+    const s = case.source;
+    var state: std.heap.ArenaAllocator = .init(case.gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    // Q then a literal: some proofs hold, some do not, and the strategy is checked either way.
+    const qs = [_][]const u8{ "[0-9a-q]", "[^x]*", "\\w+", "\\s+", "\\d", "[a-z]{2}", "zz", "b", "(?:ab|cd)", "[A-Z]?", "x+", "\\s" };
+    const ls = [_][]const u8{ "zz", "XYZ", "ab", "z", "bz", "x" };
+    var out: std.ArrayList(u8) = .empty;
+    for (0..shakedown.gen.intRange(s, usize, 1, 2)) |alt| {
+        if (alt > 0) try out.append(a, '|');
+        for (0..shakedown.gen.intRange(s, usize, 1, 3)) |_| try out.appendSlice(a, qs[shakedown.gen.intRange(s, usize, 0, qs.len - 1)]);
+        try out.appendSlice(a, ls[shakedown.gen.intRange(s, usize, 0, ls.len - 1)]);
+    }
+    var h: std.ArrayList(u8) = .empty;
+    const bits = [_][]const u8{ "a", "b", "z", "zz", "x", "XYZ", " ", "1", "q", "cd" };
+    for (0..shakedown.gen.intRange(s, usize, 0, 12)) |_| try h.appendSlice(a, bits[shakedown.gen.intRange(s, usize, 0, bits.len - 1)]);
+    case.note("/{s}/ on {s}", .{ out.items, h.items });
+    var re = Regex.compile(case.gpa, .init(out.items), .{}) catch return;
+    defer re.deinit();
+    var alone = try Regex.compile(case.gpa, .init(out.items), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
+    defer alone.deinit();
+    var cache = try re.cache(case.gpa);
+    defer cache.deinit(case.gpa);
+    var alone_cache = try alone.cache(case.gpa);
+    defer alone_cache.deinit(case.gpa);
+    const lo = shakedown.gen.intRange(s, usize, 0, h.items.len);
+    const input: Regex.Input = .{ .haystack = h.items, .span = .{ .start = lo, .end = h.items.len } };
+    try testing.expectEqual(alone.find(&alone_cache, input), re.find(&cache, input));
+    if (re.strategy == .reverse_suffix) suffixed.taken += 1 else suffixed.refused += 1;
+}
+
+var suffixed: struct { taken: usize = 0, refused: usize = 0 } = .{};
+
+test "fuzz: the reverse suffix strategy finds what the PikeVM finds, where it leads and where it is refused" {
+    suffixed = .{};
+    try shakedown.check(gpa, {}, anySuffixed, .{ .cases = 4000, .seed = 0x5ff });
+    errdefer std.debug.print("{any}\n", .{suffixed});
+    try testing.expect(suffixed.taken > 500 and suffixed.refused > 500);
+}
