@@ -67,6 +67,10 @@ const Tally = struct {
     start_reverse_dfa_fell_back: usize = 0,
     start_pikevm: usize = 0,
     no_reverse_dfa: usize = 0,
+    /// Which engine wrote each case's captures (`Regex.Cache.Slots`).
+    slots_backtrack: usize = 0,
+    slots_backtrack_fell_back: usize = 0,
+    slots_pikevm: usize = 0,
 };
 
 fn codeUnits(case: Case) bool {
@@ -125,9 +129,9 @@ test "V8's verdicts, through the ECMAScript dialect" {
             errdefer re.deinit();
             if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
             if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0) } });
+            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0) } });
             errdefer alone.deinit();
-            try testing.expect(!alone.engines().lazy_dfa);
+            try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack);
             const ast = try a.create(@import("syntax/Ast.zig"));
             ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
             const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
@@ -139,6 +143,11 @@ test "V8's verdicts, through the ECMAScript dialect" {
         const cache = &held.?.cache;
         const groups = try a.alloc(?Regex.Span, re.captureCount());
         const found = re.captures(cache, .of(case.haystack), groups);
+        if (found) switch (cache.last_slots) {
+            .pikevm => tally.slots_pikevm += 1,
+            .backtrack => tally.slots_backtrack += 1,
+            .backtrack_fell_back => tally.slots_backtrack_fell_back += 1,
+        };
         switch (cache.last) {
             .pikevm => {},
             .lazy_dfa => tally.path_lazy_dfa += 1,
@@ -213,6 +222,10 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .start_reverse_dfa_fell_back = 0,
         .start_pikevm = 40,
         .no_reverse_dfa = 0,
+        // Every case's captures are the backtracker's, the PikeVM alone saying the same.
+        .slots_backtrack = 3241,
+        .slots_backtrack_fell_back = 0,
+        .slots_pikevm = 0,
     }, tally);
 }
 

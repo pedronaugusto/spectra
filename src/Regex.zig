@@ -3,7 +3,8 @@
 //!
 //! Engines (`strategy.zig` chooses how they are put together): the lazy DFA finds whether there
 //! is a match and where the leftmost-first one ends; the reverse lazy DFA, read back from that
-//! end, where it starts; the PikeVM, anchored over the match, its captures. Where the reverse
+//! end, where it starts; the bounded backtracker, or the PikeVM where the match is longer than
+//! the backtracker's bits hold, anchored over the match, its captures. Where the reverse
 //! lazy DFA quits or gives up, the PikeVM searches the span cut at the end; where the lazy DFA
 //! does, the whole span from its start; a pattern with no lazy DFA (`engines`) is the PikeVM's
 //! alone. A pattern whose every match ends at the haystack's end is read back from there and
@@ -25,6 +26,7 @@ const compile_mod = @import("nfa/compile.zig");
 const pikevm = @import("pikevm.zig");
 const lazy = @import("lazy.zig");
 const strategy_mod = @import("strategy.zig");
+const backtrack = @import("backtrack.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -39,6 +41,8 @@ dfa: ?lazy.Dfa,
 reverse: ?Reverse,
 /// How searches put the engines together, chosen from the automaton and the engines it has.
 strategy: strategy_mod.Strategy,
+/// The bounded backtracker's bits and stack; null where `Limits.backtrack` holds no position.
+backtracker: ?backtrack.Sizes,
 
 const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
@@ -72,13 +76,15 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward);
     var reverse: ?Reverse = if (dfa == null) null else try compileReverse(gpa, &hir, options, whole);
     errdefer if (reverse) |*r| r.nfa.deinit(gpa);
+    const sizes = backtrack.sizes(&nfa, options.limits.backtrack.raw());
+    const backtracker: ?backtrack.Sizes = if (sizes.longest() != null) sizes else null;
     // What each search's cache would hold, refused before any is made.
-    if ((cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+    if ((cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null, backtracker) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
     const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null);
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy };
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker };
 }
 
 /// The reverse automaton and its lazy DFA, or null where the automaton passes `Limits.nfa` (a
@@ -103,29 +109,33 @@ fn compileReverse(gpa: Allocator, hir: *const Hir, options: Options, whole: Ast.
     return .{ .nfa = nfa, .dfa = dfa };
 }
 
-fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Dfa) ?usize {
+fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Dfa, backtracker: ?backtrack.Sizes) ?usize {
     const pike = pikevm.sizes(nfa).bytes() orelse return null;
     const lazy_bytes = if (dfa) |d| d.bytes() else 0;
     const reverse_bytes = if (reverse) |d| d.bytes() else 0;
-    return std.math.add(usize, pike, std.math.add(usize, lazy_bytes, reverse_bytes) catch return null) catch null;
+    const back_bytes = if (backtracker) |b| b.bytes() else 0;
+    const dfas = std.math.add(usize, lazy_bytes, reverse_bytes) catch return null;
+    return std.math.add(usize, pike, std.math.add(usize, dfas, back_bytes) catch return null) catch null;
 }
 
 /// The bytes a `Cache` of this pattern allocates, every engine's: what `Limits.cache` bounded.
 pub fn cacheBytes(re: *const Regex) usize {
-    return cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null).?;
+    return cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker).?;
 }
 
 /// The engines the compiled pattern has. The PikeVM always; the lazy DFA unless its store
 /// (`Limits.lazy_dfa`) cannot hold the fewest states a search needs; the reverse lazy DFA with
-/// it, unless its automaton passes `Limits.nfa` or its store is as short.
+/// it, unless its automaton passes `Limits.nfa` or its store is as short; the bounded
+/// backtracker unless `Limits.backtrack` holds no position.
 pub const Engines = struct {
     pikevm: bool = true,
     lazy_dfa: bool,
     reverse_dfa: bool,
+    backtrack: bool,
 };
 
 pub fn engines(re: *const Regex) Engines {
-    return .{ .lazy_dfa = re.dfa != null, .reverse_dfa = re.reverse != null };
+    return .{ .lazy_dfa = re.dfa != null, .reverse_dfa = re.reverse != null, .backtrack = re.backtracker != null };
 }
 
 pub fn deinit(re: *Regex) void {
@@ -139,9 +149,12 @@ pub const Cache = struct {
     pike: pikevm.Cache,
     lazy: ?lazy.Cache,
     reverse: ?lazy.Cache,
+    back: ?backtrack.Cache,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
     last_start: Start = .pikevm,
+    /// Which engine wrote the last `find`'s or `captures`' slots, where one was asked.
+    last_slots: Slots = .pikevm,
 
     pub const Path = enum {
         /// The PikeVM alone: no lazy DFA.
@@ -167,10 +180,20 @@ pub const Cache = struct {
         reverse_dfa_fell_back,
     };
 
+    pub const Slots = enum {
+        /// The PikeVM: no backtracker, or a span longer than its bits hold.
+        pikevm,
+        /// The bounded backtracker.
+        backtrack,
+        /// The backtracker's stack filled, and the PikeVM searched.
+        backtrack_fell_back,
+    };
+
     pub fn deinit(c: *Cache, gpa: Allocator) void {
         c.pike.deinit(gpa);
         if (c.lazy) |*l| l.deinit(gpa);
         if (c.reverse) |*r| r.deinit(gpa);
+        if (c.back) |*b| b.deinit(gpa);
     }
 };
 
@@ -179,7 +202,9 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
     errdefer pike.deinit(gpa);
     var forward: ?lazy.Cache = if (re.dfa) |*d| try lazy.Cache.init(gpa, d) else null;
     errdefer if (forward) |*f| f.deinit(gpa);
-    return .{ .pike = pike, .lazy = forward, .reverse = if (re.reverse) |*r| try lazy.Cache.init(gpa, &r.dfa) else null };
+    var reverse: ?lazy.Cache = if (re.reverse) |*r| try lazy.Cache.init(gpa, &r.dfa) else null;
+    errdefer if (reverse) |*r| r.deinit(gpa);
+    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = if (re.backtracker) |b| try backtrack.Cache.init(gpa, b) else null };
 }
 
 /// What the PikeVM searches: the input cut at the match's end where the lazy DFA found one, null
@@ -230,6 +255,7 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     c.pike.visited = 0;
     if (c.lazy) |*l| l.visited = 0;
     if (c.reverse) |*r| r.visited = 0;
+    if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
     if (re.strategy == .reverse_anchored) {
         const r = &re.reverse.?;
@@ -269,14 +295,27 @@ pub fn find(re: *const Regex, c: *Cache, input: Input) ?Span {
         .span => |span| return span,
         .search => |cut| cut,
     };
-    _ = pikevm.search(&re.nfa, &c.pike, cut, &slots) orelse return null;
+    _ = re.slotted(c, cut, &slots) orelse return null;
     return .{ .start = slots[0].?, .end = slots[1].? };
+}
+
+/// The leftmost-first match in `input` with `slots` written, as the PikeVM's `search`: by the
+/// bounded backtracker where the span fits its bits and its stack holds, else the PikeVM.
+fn slotted(re: *const Regex, c: *Cache, input: Input, slots: []?usize) ?usize {
+    c.last_slots = .pikevm;
+    if (re.backtracker) |b| if (input.span.len() <= b.longest().?) {
+        if (backtrack.search(&re.nfa, &c.back.?, input, slots)) |end| {
+            c.last_slots = .backtrack;
+            return end;
+        } else |_| c.last_slots = .backtrack_fell_back;
+    };
+    return pikevm.search(&re.nfa, &c.pike, input, slots);
 }
 
 /// The leftmost-first match with each group's span in `out`, null where a group took no part.
 /// `out.len == captureCount()` is the caller's contract. Where the lazy DFAs found the match,
-/// the PikeVM searches it alone, anchored at its start: the preferred match from there ends
-/// where they said, so its captures are the leftmost-first match's.
+/// the backtracker or the PikeVM searches it alone, anchored at its start: the preferred match
+/// from there ends where they said, so its captures are the leftmost-first match's.
 pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
     aegis.assert.invariant(out.len == re.nfa.groups, "a capture slice holds one span per group");
     const slots = c.pike.slots;
@@ -291,11 +330,11 @@ pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
         },
         .search => |cut| cut,
     };
-    const end = pikevm.search(&re.nfa, &c.pike, cut, slots) orelse {
-        aegis.assert.invariant(located != .span, "the PikeVM finds the match the lazy DFAs found");
+    const end = re.slotted(c, cut, slots) orelse {
+        aegis.assert.invariant(located != .span, "the match the lazy DFAs found is found again");
         return false;
     };
-    if (located == .span) aegis.assert.invariant(end == located.span.end and slots[0].? == located.span.start, "the PikeVM's match is the one the lazy DFAs found");
+    if (located == .span) aegis.assert.invariant(end == located.span.end and slots[0].? == located.span.start, "the match found again is the one the lazy DFAs found");
     for (out, 0..) |*span, g| {
         span.* = if (slots[2 * g]) |start| .{ .start = start, .end = slots[2 * g + 1].? } else null;
     }

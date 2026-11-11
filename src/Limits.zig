@@ -19,5 +19,10 @@ cache: aegis.units.Bytes(usize) = .literal("32MiB"),
 /// whose fewest states do not fit has no lazy DFA that way (`Regex.engines`), and the PikeVM
 /// answers what it would have.
 lazy_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),
+/// The bounded backtracker's bits and stack in each `Cache`, within `cache`: regex-automata's
+/// default for its bits. Three quarters are a bit per state and position, which bounds the
+/// spans it searches (`Regex` gives longer ones to the PikeVM); a quarter is its stack, and a
+/// search that outgrows it is the PikeVM's too. Zero: no backtracker.
+backtrack: aegis.units.Bytes(usize) = .literal("256KiB"),
 /// The largest dense DFA built ahead.
 dense_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),

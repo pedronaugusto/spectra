@@ -8,6 +8,7 @@ const Limits = @import("Limits.zig");
 const Syntax = @import("Syntax.zig");
 const pikevm = @import("pikevm.zig");
 const backtrack = @import("testing/backtrack.zig");
+const bounded = @import("backtrack.zig");
 const lazy = @import("lazy.zig");
 const grammar = @import("testing/grammar.zig");
 const testing = std.testing;
@@ -151,7 +152,11 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
     // The lazy DFA's store, small enough at times that it clears and gives up.
     const stores = [_]usize{ 2 << 20, 64 << 10, 16 << 10, 8 << 10 };
     const store = stores[shakedown.gen.intRange(s, usize, 0, stores.len - 1)];
-    var re = Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntax, .limits = .{ .lazy_dfa = .fromRaw(store) } }) catch |err| switch (err) {
+    // The backtracker's bits and stack, small enough at times that a span is too long for them
+    // or the stack fills.
+    const budgets = [_]usize{ 256 << 10, 4 << 10, 512, 160, 128 };
+    const budget = budgets[shakedown.gen.intRange(s, usize, 0, budgets.len - 1)];
+    var re = Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntax, .limits = .{ .lazy_dfa = .fromRaw(store), .backtrack = .fromRaw(budget) } }) catch |err| switch (err) {
         error.Invalid, error.Unsupported, error.TooLarge => return,
         error.OutOfMemory => return err,
     };
@@ -176,6 +181,17 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
     var earliest = input;
     earliest.earliest = true;
     try testing.expectEqual(want_end != null, pikevm.search(&re.nfa, &cache.pike, earliest, &.{}) != null);
+    // The bounded backtracker finds the same, every slot, where the span fits its bits, or its
+    // stack fills.
+    if (re.backtracker) |b| if (hi - lo <= b.longest().?) {
+        if (bounded.search(&re.nfa, &cache.back.?, input, got)) |ended| {
+            try testing.expectEqual(want_end, ended);
+            if (ended != null) try testing.expectEqualSlices(?usize, want, got);
+            agreed.backtracked += 1;
+        } else |_| agreed.deep += 1;
+    } else {
+        agreed.too_long += 1;
+    };
     // The lazy DFA finds the same end, or quits or gives up; with `earliest`, whether one exists.
     if (re.dfa) |*d| {
         if (lazy.search(&re.nfa, d, &cache.lazy.?, input)) |ended| try testing.expectEqual(want_end, ended) else |_| {}
@@ -197,8 +213,15 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
     } else try testing.expectEqual(null, want_end);
 }
 
+/// What the fuzz above reached of the bounded backtracker.
+var agreed: struct { backtracked: usize = 0, deep: usize = 0, too_long: usize = 0 } = .{};
+
 test "fuzz: the PikeVM's match and captures are the backtracker's" {
+    agreed = .{};
     try shakedown.check(gpa, {}, anyAgreement, .{ .cases = 5000, .seed = 0x91e });
+    errdefer std.debug.print("{any}\n", .{agreed});
+    // Spans here are short: the one too long for the bits is the test below's.
+    try testing.expect(agreed.backtracked > 1000 and agreed.deep > 100);
 }
 
 // The lazy DFA against the PikeVM.
@@ -328,7 +351,7 @@ fn visited(pattern: []const u8, syntax: Syntax, haystack: []const u8) !struct { 
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     _ = re.find(&cache, .of(haystack));
-    return .{ .visited = cache.pike.visited + cache.lazy.?.visited + cache.reverse.?.visited, .threads = pikevm.sizes(&re.nfa).threads };
+    return .{ .visited = cache.pike.visited + cache.lazy.?.visited + cache.reverse.?.visited + cache.back.?.explored, .threads = pikevm.sizes(&re.nfa).threads };
 }
 
 test "a search's work is linear in the haystack on what makes a backtracker exponential" {
@@ -408,7 +431,7 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     const pattern = "(a|b)*a(a|b){20}";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0) } });
+    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0) } });
     defer alone.deinit();
     try testing.expect(re.engines().lazy_dfa and !alone.engines().lazy_dfa);
     var alone_cache = try alone.cache(gpa);
@@ -442,7 +465,7 @@ test "a reverse lazy DFA that gives up leaves the start to the PikeVM, over the 
     const pattern = "(a|b){20}a(a|b)*";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true }, re.engines());
     const big = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(big);
     var prng: std.Random.DefaultPrng = .init(0x7e5e);
@@ -515,14 +538,14 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
 test "a store too small for the fewest states leaves the pattern no lazy DFA, and says so" {
     var re = try Regex.compile(gpa, .init("a+b"), .{ .limits = .{ .lazy_dfa = .fromRaw(64) } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true }, re.engines());
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     try testing.expectEqual(Regex.Span{ .start = 1, .end = 4 }, re.find(&cache, .of("xaab")).?);
     try testing.expectEqual(.pikevm, cache.last);
     var roomy = try Regex.compile(gpa, .init("a+b"), .{});
     defer roomy.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true }, roomy.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true }, roomy.engines());
 }
 
 // Every match in turn, counted.
@@ -539,7 +562,7 @@ fn iterationWork(pattern: []const u8, haystack: []const u8) !Iteration {
     var total: Iteration = .{ .work = 0, .matches = 0 };
     while (true) {
         const m = it.next();
-        total.work += cache.pike.visited + (if (cache.lazy) |l| l.visited else 0) + (if (cache.reverse) |r| r.visited else 0);
+        total.work += cache.pike.visited + (if (cache.lazy) |l| l.visited else 0) + (if (cache.reverse) |r| r.visited else 0) + (if (cache.back) |b| b.explored else 0);
         if (m == null) break;
         total.matches += 1;
     }
@@ -601,7 +624,7 @@ test "a pattern whose every match ends at the haystack's end is read back from t
         const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "ab ", n), "end" });
         try testing.expectEqual(Regex.Span{ .start = h.len - 3, .end = h.len }, re.find(&cache, .of(h)).?);
         try testing.expectEqual(.reverse_anchored, cache.last);
-        try testing.expectEqual(0, cache.lazy.?.visited + cache.pike.visited);
+        try testing.expectEqual(0, cache.lazy.?.visited + cache.pike.visited + cache.back.?.explored);
         work[i] = cache.reverse.?.visited;
         var groups: [2]?Regex.Span = undefined;
         try testing.expect(re.captures(&cache, .of(h), &groups));
@@ -624,7 +647,7 @@ test "a pattern whose every match ends at the haystack's end is read back from t
     try testing.expectEqual(.lazy_dfa_fell_back, wide_cache.last);
 }
 
-test "captures are the PikeVM's over the match alone where the lazy DFAs found it" {
+test "captures are the backtracker's over the match alone where the lazy DFAs found it" {
     var re = try compiled("(a+)(b)?", .{});
     defer re.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
@@ -637,9 +660,59 @@ test "captures are the PikeVM's over the match alone where the lazy DFAs found i
         var groups: [3]?Regex.Span = undefined;
         try testing.expect(re.captures(&cache, .of(h), &groups));
         try testing.expectEqual(.reverse_dfa, cache.last_start);
+        try testing.expectEqual(.backtrack, cache.last_slots);
         try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = n, .end = n + 3 }, .{ .start = n, .end = n + 2 }, .{ .start = n + 2, .end = n + 3 } }, &groups);
-        work[i] = cache.pike.visited;
+        try testing.expectEqual(0, cache.pike.visited);
+        work[i] = cache.back.?.explored;
     }
-    // The PikeVM reads the match, not what comes before it.
+    // The backtracker reads the match, not what comes before it.
     try testing.expectEqual(work[0], work[1]);
+}
+
+// The bounded backtracker.
+
+test "the bounded backtracker explores each state and position once, and leaves longer spans and deep stacks to the PikeVM" {
+    // Work: at most one exploration per (state, bit, position), whatever the pattern.
+    for ([_]struct { pattern: []const u8, syntax: Syntax = .{} }{
+        .{ .pattern = "(a*)*b" },
+        .{ .pattern = "(a|a)*b" },
+        .{ .pattern = "(x+x+)+y" },
+        .{ .pattern = "(a*)*b", .syntax = ecma },
+    }) |case| {
+        var re = try compiled(case.pattern, case.syntax);
+        defer re.deinit();
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        const fill = case.pattern[1];
+        var h: [200]u8 = undefined;
+        @memset(&h, fill);
+        var slots: [4]?usize = undefined;
+        try testing.expectEqual(null, try bounded.search(&re.nfa, &cache.back.?, .of(&h), &slots));
+        try testing.expect(cache.back.?.explored <= re.backtracker.?.threads * (h.len + 1));
+    }
+    // A span longer than the bits hold is the PikeVM's; one that fits, the backtracker's.
+    var re = try Regex.compile(gpa, .init("(a+)"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
+    defer re.deinit();
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    const longest = re.backtracker.?.longest().?;
+    var a: std.heap.ArenaAllocator = .init(gpa);
+    defer a.deinit();
+    var groups: [2]?Regex.Span = undefined;
+    const short = try repeatText(a.allocator(), "a", 10);
+    try testing.expect(re.captures(&cache, .of(short), &groups));
+    try testing.expectEqual(.backtrack, cache.last_slots);
+    const long = try repeatText(a.allocator(), "a", longest + 1);
+    try testing.expect(re.captures(&cache, .of(long), &groups));
+    try testing.expectEqual(.pikevm, cache.last_slots);
+    try testing.expectEqual(Regex.Span{ .start = 0, .end = long.len }, groups[1].?);
+    // `(a)*` waits on one alternative per a: past the stack, the PikeVM answers.
+    var deep = try Regex.compile(gpa, .init("(a)*"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
+    defer deep.deinit();
+    var deep_cache = try deep.cache(gpa);
+    defer deep_cache.deinit(gpa);
+    const run = try repeatText(a.allocator(), "a", @min(deep.backtracker.?.longest().?, 1000));
+    try testing.expect(deep.captures(&deep_cache, .of(run), &groups));
+    try testing.expectEqual(.backtrack_fell_back, deep_cache.last_slots);
+    try testing.expectEqual(Regex.Span{ .start = run.len - 1, .end = run.len }, groups[1].?);
 }

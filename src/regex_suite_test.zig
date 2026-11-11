@@ -50,6 +50,10 @@ const Tally = struct {
     start_pikevm: usize = 0,
     start_reverse_dfa: usize = 0,
     start_reverse_dfa_fell_back: usize = 0,
+    /// Captures found, by the engine that wrote them (`Regex.Cache.Slots`).
+    slots_pikevm: usize = 0,
+    slots_backtrack: usize = 0,
+    slots_backtrack_fell_back: usize = 0,
 
     fn countStart(tally: *Tally, start: Regex.Cache.Start) void {
         switch (start) {
@@ -186,7 +190,10 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     };
     var d: Regex.Diagnostic = .{};
     var limits: @import("Limits.zig") = .{ .repetition = .literal(100_000) };
-    if (engines == .pikevm) limits.lazy_dfa = .fromRaw(0);
+    if (engines == .pikevm) {
+        limits.lazy_dfa = .fromRaw(0);
+        limits.backtrack = .fromRaw(0);
+    }
     var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d }) catch |err| {
         if (flag(t, "compiles", true)) {
             std.debug.print("{s}/{s}: /{s}/ refused: {t} {t}\n", .{ file, name, pattern, err, d.reason });
@@ -200,7 +207,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
         if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
         if (re.engines().lazy_dfa and !re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa) {
+    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa or re.engines().backtrack) {
         std.debug.print("{s}/{s}: /{s}/ has a lazy DFA in no store\n", .{ file, name, pattern });
         tally.failed += 1;
         return false;
@@ -252,6 +259,11 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     k = 0;
     while (k < limit and caps.nextCaptures(groups)) : (k += 1) {
         tally.count(cache.last);
+        switch (cache.last_slots) {
+            .pikevm => tally.slots_pikevm += 1,
+            .backtrack => tally.slots_backtrack += 1,
+            .backtrack_fell_back => tally.slots_backtrack_fell_back += 1,
+        }
         const w = want.matches[k];
         const compared = if (want.groups_given) groups else groups[0..1];
         if (w.len != compared.len or !std.meta.eql(w, compared) and !spansEql(w, compared)) {
@@ -304,5 +316,9 @@ test "regex's own test suite, through the Rust dialect" {
         .start_pikevm = 1567,
         .start_reverse_dfa = 1489,
         .start_reverse_dfa_fell_back = 0,
+        // Captures: the backtracker's on the default path, the PikeVM's on its own.
+        .slots_pikevm = 1528,
+        .slots_backtrack = 1528,
+        .slots_backtrack_fell_back = 0,
     }, tally);
 }
