@@ -147,7 +147,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
         const re = &held.?.re;
         const cache = &held.?.cache;
         const groups = try a.alloc(?Regex.Span, re.captureCount());
-        const found = re.captures(cache, .of(case.haystack), groups);
+        const found = (try re.captures(cache, .of(case.haystack), groups));
         if (found) switch (cache.last_slots) {
             .pikevm => tally.slots_pikevm += 1,
             .backtrack => tally.slots_backtrack += 1,
@@ -163,7 +163,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .reverse_suffix => tally.path_reverse_suffix += 1,
             .reverse_inner => tally.path_reverse_inner += 1,
         }
-        const span = re.find(cache, .of(case.haystack));
+        const span = (try re.find(cache, .of(case.haystack)));
         if (found != (span != null) or (found and !std.meta.eql(groups[0].?, span.?))) {
             std.debug.print("/{s}/{s} on {any}: find {any}, captures {any}\n", .{ case.pattern, case.flags, case.haystack, span, groups[0] });
             return error.TestUnexpectedResult;
@@ -175,7 +175,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .prefilter => tally.start_prefilter += 1,
         };
         const alone_groups = try a.alloc(?Regex.Span, re.captureCount());
-        if (held.?.alone.captures(&held.?.alone_cache, .of(case.haystack), alone_groups) != found or (found and !std.meta.eql(groups, alone_groups) and !spansEqlBoth(groups, alone_groups))) {
+        if ((try held.?.alone.captures(&held.?.alone_cache, .of(case.haystack), alone_groups)) != found or (found and !std.meta.eql(groups, alone_groups) and !spansEqlBoth(groups, alone_groups))) {
             std.debug.print("/{s}/{s} on {any}: {any}, the PikeVM alone {any}\n", .{ case.pattern, case.flags, case.haystack, groups, alone_groups });
             return error.TestUnexpectedResult;
         }
@@ -277,7 +277,7 @@ fn anyOracle(_: void, case: *shakedown.Case) !void {
         else => return err,
     };
     const groups = try a.alloc(?Regex.Span, re.captureCount());
-    const found = re.captures(&cache, .of(haystack.items), groups);
+    const found = (try re.captures(&cache, .of(haystack.items), groups));
     try testing.expectEqual(said != null, found);
     if (said) |want| for (want, groups) |w, g| {
         try testing.expectEqual(w == null, g == null);

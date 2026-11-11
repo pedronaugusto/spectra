@@ -239,7 +239,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
 
     // Is-match, over the whole haystack as regex asks it, when the test does not bound it.
     if (input.span.start == 0 and input.span.end == haystack.len and !input.anchored) {
-        const got = re.isMatch(&cache, haystack);
+        const got = (try re.isMatch(&cache, haystack));
         tally.count(cache.last);
         if (got != (want.matches.len > 0)) {
             std.debug.print("{s}/{s}: /{s}/ {t}: is-match {}\n", .{ file, name, pattern, engines, want.matches.len == 0 });
@@ -251,7 +251,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     var it = re.findAllIn(&cache, input);
     var k: usize = 0;
     while (k < limit) : (k += 1) {
-        const found = it.next();
+        const found = (try it.next());
         tally.count(cache.last);
         if (cache.lazy) |l| if (l.candidates > 0) {
             tally.prefiltered += 1;
@@ -272,7 +272,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     const groups = try a.alloc(?Span, re.captureCount());
     var caps = re.findAllIn(&cache, input);
     k = 0;
-    while (k < limit and caps.nextCaptures(groups)) : (k += 1) {
+    while (k < limit and (try caps.nextCaptures(groups))) : (k += 1) {
         tally.count(cache.last);
         switch (cache.last_slots) {
             .pikevm => tally.slots_pikevm += 1,

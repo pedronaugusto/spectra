@@ -501,9 +501,28 @@ fn reverseInner(re: *const Regex, c: *Cache, input: Input) lazy.LimitedError!?Sp
     }
 }
 
-pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
+/// Why a search is refused: `error.HaystackTooLong`, only where the compiled pattern stores
+/// lookaround rows for that kind of search and the haystack passes `Limits.oracle`
+/// (`longestHaystack` says the limit up front). No pattern stores rows yet: lookaround is
+/// refused at compile, so no search returns it today.
+pub const SearchError = error{HaystackTooLong};
+
+/// The kinds of search, which may store different rows.
+pub const Search = enum { is_match, find, captures, find_all };
+
+/// The longest haystack `search` takes on this pattern, or null where it takes any: always
+/// null until lookaround stores rows.
+pub fn longestHaystack(re: *const Regex, search: Search) ?usize {
+    _ = re;
+    _ = search;
+    return null;
+}
+
+/// Whether some match is in `haystack`. `error.HaystackTooLong` only as `SearchError` says,
+/// never otherwise.
+pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!bool {
     var input: Input = .of(haystack);
-    if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix or re.strategy == .reverse_inner) return re.find(c, input) != null;
+    if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix or re.strategy == .reverse_inner) return re.findSpan(c, input) != null;
     input.earliest = true;
     c.pike.visited = 0;
     const cut = re.narrowed(c, input) orelse return false;
@@ -511,8 +530,13 @@ pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
     return pikevm.search(&re.nfa, &c.pike, cut, &.{}) != null;
 }
 
-/// The leftmost-first match.
-pub fn find(re: *const Regex, c: *Cache, input: Input) ?Span {
+/// The leftmost-first match. `error.HaystackTooLong` only as `SearchError` says, never
+/// otherwise.
+pub fn find(re: *const Regex, c: *Cache, input: Input) SearchError!?Span {
+    return re.findSpan(c, input);
+}
+
+fn findSpan(re: *const Regex, c: *Cache, input: Input) ?Span {
     var slots: [2]?usize = undefined;
     const cut = switch (re.locate(c, input)) {
         .none => return null,
@@ -540,8 +564,12 @@ fn slotted(re: *const Regex, c: *Cache, input: Input, slots: []?usize) ?usize {
 /// `out.len == captureCount()` is the caller's contract. Where the lazy DFAs found the match,
 /// the one-pass DFA, the backtracker or the PikeVM searches it alone, anchored at its start: the
 /// preferred match from there ends where they said, so its captures are the leftmost-first
-/// match's.
-pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
+/// match's. `error.HaystackTooLong` only as `SearchError` says, never otherwise.
+pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) SearchError!bool {
+    return re.capturesOf(c, input, out);
+}
+
+fn capturesOf(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
     aegis.assert.invariant(out.len == re.nfa.groups, "a capture slice holds one span per group");
     const slots = c.pike.slots;
     const located = re.locate(c, input);
@@ -594,13 +622,14 @@ pub const Matches = struct {
     input: Input,
     last_end: ?usize = null,
 
-    pub fn next(m: *Matches) ?Span {
+    /// The next match. `error.HaystackTooLong` only as `SearchError` says, never otherwise.
+    pub fn next(m: *Matches) SearchError!?Span {
         if (m.input.span.start > m.input.span.end) return null;
-        var found = m.re.find(m.cache, m.input) orelse return null;
+        var found = m.re.findSpan(m.cache, m.input) orelse return null;
         if (found.start == found.end and m.last_end == found.end) {
             if (m.input.span.start >= m.input.span.end) return null;
             m.input.span.start += 1;
-            found = m.re.find(m.cache, m.input) orelse return null;
+            found = m.re.findSpan(m.cache, m.input) orelse return null;
         }
         m.input.span.start = found.end;
         m.last_end = found.end;
@@ -608,13 +637,14 @@ pub const Matches = struct {
     }
 
     /// The next match as `next` finds it, with each group's span in `out`.
-    pub fn nextCaptures(m: *Matches, out: []?Span) bool {
+    /// `error.HaystackTooLong` only as `SearchError` says, never otherwise.
+    pub fn nextCaptures(m: *Matches, out: []?Span) SearchError!bool {
         if (m.input.span.start > m.input.span.end) return false;
-        if (!m.re.captures(m.cache, m.input, out)) return false;
+        if (!m.re.capturesOf(m.cache, m.input, out)) return false;
         if (out[0].?.start == out[0].?.end and m.last_end == out[0].?.end) {
             if (m.input.span.start >= m.input.span.end) return false;
             m.input.span.start += 1;
-            if (!m.re.captures(m.cache, m.input, out)) return false;
+            if (!m.re.capturesOf(m.cache, m.input, out)) return false;
         }
         m.input.span.start = out[0].?.end;
         m.last_end = out[0].?.end;

@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Regex.SearchError` (`error.HaystackTooLong`): every search (`isMatch`, `find`, `captures`, and `Matches.next` and
+  `nextCaptures`) returns it, for lookaround's stored rows to come, which a search past `Limits.oracle` refuses by
+  name. No pattern stores rows yet, so no search returns it. `Regex.longestHaystack(search)` says the limit up
+  front; null today.
 - The Rust dialect's parser: a pattern into an `Ast` whose every node carries its span, groups and nested classes read
   with explicit stacks bounded by `Limits.nesting`, every count and code point checked before use, the pattern taken
   as `aegis.input.Untrusted`.

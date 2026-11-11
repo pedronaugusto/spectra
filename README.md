@@ -29,17 +29,17 @@ defer re.deinit();
 var cache = try re.cache(gpa);
 defer cache.deinit(gpa);
 const haystack = "write to ann@example.com or bob@test.com";
-std.debug.assert(re.isMatch(&cache, haystack));
-const m = re.find(&cache, .of(haystack)).?;
+std.debug.assert((try re.isMatch(&cache, haystack)));
+const m = (try re.find(&cache, .of(haystack))).?;
 std.debug.assert(std.mem.eql(u8, haystack[m.start..m.end], "ann@example.com"));
 // Each group's span, the whole match first; null where a group took no part.
 var groups: [3]?spectra.Regex.Span = undefined;
-std.debug.assert(re.captures(&cache, .of(haystack), &groups));
+std.debug.assert((try re.captures(&cache, .of(haystack), &groups)));
 std.debug.assert(std.mem.eql(u8, haystack[groups[2].?.start..groups[2].?.end], "example"));
 // Every match in turn.
 var it = re.findAll(&cache, haystack);
 var count: usize = 0;
-while (it.next()) |_| count += 1;
+while ((try it.next())) |_| count += 1;
 std.debug.assert(count == 2);
 ```
 <!-- END GENERATED -->
@@ -56,7 +56,7 @@ var re = try spectra.Regex.compile(gpa, .init("(|a)+"), .{ .syntax = .{ .dialect
 defer re.deinit();
 var cache = try re.cache(gpa);
 defer cache.deinit(gpa);
-const m = re.find(&cache, .of("a")).?;
+const m = (try re.find(&cache, .of("a"))).?;
 std.debug.assert(m.start == 0 and m.end == 1);
 // Whether a pattern is valid ECMA-262, whatever spectra runs.
 std.debug.assert(try spectra.ecmascript.validate(gpa, .init("(?<year>\\d{4})-\\k<year>"), "u", .{}, null));
