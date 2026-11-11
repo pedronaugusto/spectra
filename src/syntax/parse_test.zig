@@ -221,16 +221,23 @@ test "the limits refuse a long pattern, deep nesting and a large count before an
 
 const alphabet = "ab()[]{}|*+?^$.\\-&~:<>=!,0123456789dDsSwWpPbBAzxuUnt PLi";
 
+/// The flags a pattern is read under: each changes what the parser accepts.
+const syntaxes = [_]Syntax{ .{}, .{ .unicode = false }, .{ .unicode = false, .utf8 = false }, .{ .case_insensitive = true }, .{ .multi_line = true }, .{ .ignore_whitespace = true }, .{ .swap_greed = true }, .{ .dot_matches_new_line = true } };
+
 fn anyPattern(_: void, case: *shakedown.Case) !void {
     const s = case.source;
     const n = shakedown.gen.intRange(s, usize, 0, 48);
     const pattern = try case.gpa.alloc(u8, n);
-    for (pattern) |*b| b.* = alphabet[shakedown.gen.intRange(s, usize, 0, alphabet.len - 1)];
-    case.note("/{s}/", .{pattern});
+    defer case.gpa.free(pattern);
+    // Mostly the syntax's own characters, so the grammar is reached; at times any bytes.
+    const raw = shakedown.gen.intRange(s, u8, 0, 3) == 0;
+    for (pattern) |*b| b.* = if (raw) shakedown.gen.intRange(s, u8, 0, 255) else alphabet[shakedown.gen.intRange(s, usize, 0, alphabet.len - 1)];
+    const syntax = syntaxes[shakedown.gen.intRange(s, usize, 0, syntaxes.len - 1)];
+    case.note("/{s}/ {any}", .{ pattern, syntax });
     var arena_state: std.heap.ArenaAllocator = .init(case.gpa);
     defer arena_state.deinit();
     var d: parse_mod.Diagnostic = .{};
-    if (parse(arena_state.allocator(), pattern, .{}, .{}, &d)) |ast| {
+    if (parse(arena_state.allocator(), pattern, syntax, .{}, &d)) |ast| {
         // Every node's span lies in the pattern, its start before its end.
         for (ast.nodes) |node| {
             try testing.expect(node.span.start <= node.span.end);

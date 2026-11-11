@@ -27,3 +27,26 @@ follow [Semantic Versioning](https://semver.org/).
   `\s`, `\w`, `\b` and case rules. Refused by name as `Unsupported`: backreferences, lookbehind, a lookaround in a
   lookaround, `v`'s properties of strings, and without `u` or `v` half of a code point past U+FFFF named alone; `.` and a
   negated class there take one code point, where a UTF-16 engine takes half of one. Walked on explicit stacks.
+- Literal extraction (`hir/literals.zig`): the literals every match starts or ends with, exact or not, regex-syntax's
+  extractor with its limits, read on an explicit stack.
+- The Thompson NFA over bytes (`nfa/compile.zig`): regex-automata's fragments and preference order, UTF-8 classes as
+  minimal byte automata, a repetition's further times copied rather than compiled again, every state charged to
+  `Limits.nfa` before it is allocated; reversed (`Options.reverse`) for the reverse searches.
+- The public engine, `Regex`: `compile(gpa, pattern, .{ syntax, limits, diagnostic, prefilter })`, `cache`, `isMatch`,
+  `find`, `captures`, `captureCount`, `captureIndex`, `findAll` and `findAllIn` over a span, anchored or not, with
+  `Matches.next` and `nextCaptures`; `engines()` says which engines a pattern has. A `Regex` is immutable and shared;
+  each thread searches with a `Cache` of its own, sized once within `Limits.cache`, and no search allocates.
+- ECMAScript's repetition semantics: each iteration clears its atom's captures, and an iteration past the minimum that
+  matches empty fails (ECMA-262's RepeatMatcher), in linear time by a bit each thread carries (Barrière and
+  Pit-Claudel, PLDI 2024, §4.1).
+- The engines: the PikeVM; the lazy DFA, forward and reversed, in a fixed store with RE2's give-up rule and quit bytes
+  for assertions that read code points; the bounded backtracker (`Limits.backtrack`); the one-pass DFA
+  (`Limits.onepass`); each checked against a backtracker over the automaton and the PikeVM.
+- The meta strategies (`strategy.zig`): the forward lazy DFA for the end, the reverse one for the start, captures over
+  the match alone; reading back from the end for a pattern anchored there; the literal strategy; reverse suffix and
+  reverse inner, each taken only where a proof shows the literal's order is the matches' order.
+- Prefilters (`Limits.prefilter`): memchr for the bytes literals start with, a rare-byte-pair search for one literal,
+  Aho-Corasick for many, Teddy for up to 64 on SSSE3, AVX2 or NEON as [ladar](https://github.com/pedronaugusto/ladar)
+  detects them.
+- Every property (parsers, translation, compilation, every engine against its oracle, any bytes as a pattern) runs
+  under Zig's fuzzer with `bay test --fuzz`, and in the release tier's `hardened-fuzz`.

@@ -602,7 +602,10 @@ fn anyPattern(_: void, case: *shakedown.Case) !void {
     const s = case.source;
     const n = shakedown.gen.intRange(s, usize, 0, 40);
     const pattern = try case.gpa.alloc(u8, n);
-    for (pattern) |*b| b.* = alphabet[shakedown.gen.intRange(s, usize, 0, alphabet.len - 1)];
+    defer case.gpa.free(pattern);
+    // Mostly the grammar's own characters; at times any bytes.
+    const raw = shakedown.gen.intRange(s, u8, 0, 3) == 0;
+    for (pattern) |*b| b.* = if (raw) shakedown.gen.intRange(s, u8, 0, 255) else alphabet[shakedown.gen.intRange(s, usize, 0, alphabet.len - 1)];
     const flags = flag_sets[shakedown.gen.intRange(s, usize, 0, flag_sets.len - 1)];
     case.note("/{s}/{s}", .{ pattern, flags });
     var d: parse_mod.Diagnostic = .{};

@@ -76,8 +76,20 @@ pub fn dev(b: *std.Build, tools: type) void {
     const test_step = b.step("test", "Run the tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
     check.dependOn(&tests.step);
+    // The README's examples, run as part of the tests.
+    const example = b.addExecutable(.{
+        .name = "usage",
+        .root_module = b.createModule(.{ .root_source_file = p.path("examples/usage.zig"), .target = target, .optimize = optimize, .imports = &.{.{ .name = "spectra", .module = package.module("spectra") }} }),
+    });
+    const examples = b.step("examples", "Build and run the usage example");
+    examples.dependOn(&b.addRunArtifact(example).step);
+    test_step.dependOn(examples);
+    check.dependOn(&example.step);
     b.getInstallStep().dependOn(&tests.step);
-    tools.preflight.addCi(b, p, .{ .tests = test_step, .portable_tests = true });
+    // The release tier runs every property under Zig's fuzzer (each shakedown property is a
+    // fuzz target: the parsers, translation, compilation and every engine against its oracle)
+    // and the suite with safety on.
+    tools.preflight.addCi(b, p, .{ .tests = test_step, .portable_tests = true, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
 }
 
 /// regex's own test suite: the files regex 1.13.1 loads, its testdata vendored in testdata/regex.

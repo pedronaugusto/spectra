@@ -27,5 +27,28 @@
   "glint_paths": [
     "src",
     "build.zig"
-  ]
+  ],
+  "docs": {
+    "zig build docs -- usage": {
+      "source": "examples/usage.zig",
+      "region": "usage",
+      "imports": [
+        "spectra"
+      ]
+    },
+    "zig build docs -- ecmascript": {
+      "source": "examples/usage.zig",
+      "region": "ecmascript",
+      "imports": [
+        "spectra"
+      ]
+    },
+    "zig build docs -- refusal": {
+      "source": "examples/usage.zig",
+      "region": "refusal",
+      "imports": [
+        "spectra"
+      ]
+    }
+  }
 }

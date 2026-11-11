@@ -13,6 +13,7 @@ const onepass = @import("onepass.zig");
 const lazy = @import("lazy.zig");
 const grammar = @import("testing/grammar.zig");
 const testing = std.testing;
+const fuzzing = @import("builtin").fuzz;
 const gpa = testing.allocator;
 
 const ecma: Syntax = .{ .dialect = .ecmascript };
@@ -226,6 +227,8 @@ var agreed: struct { backtracked: usize = 0, deep: usize = 0, too_long: usize = 
 test "fuzz: the PikeVM's match and captures are the backtracker's" {
     agreed = .{};
     try shakedown.check(gpa, {}, anyAgreement, .{ .cases = 5000, .seed = 0x91e });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{agreed});
     // Spans here are short: the one too long for the bits is the test below's.
     try testing.expect(agreed.backtracked > 1000 and agreed.deep > 100 and agreed.onepass > 300);
@@ -316,6 +319,8 @@ fn anyLazy(_: void, case: *shakedown.Case) !void {
 test "fuzz: the lazy DFA's match ends are the PikeVM's, in both dialects, through clears and give-ups" {
     reached = .{};
     try shakedown.check(gpa, {}, anyLazy, .{ .cases = 4000, .seed = 0x1a2d });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
     try testing.expect(reached.answered > 10_000 and reached.checked > 1_000);
     try testing.expect(reached.cleared > 100 and reached.gave_up > 10 and reached.quit > 100);
@@ -817,6 +822,8 @@ var reached_prefilter: [4]usize = .{ 0, 0, 0, 0 };
 test "fuzz: a prefilter finds the first place a literal starts, as a plain scan does" {
     reached_prefilter = .{ 0, 0, 0, 0 };
     try shakedown.check(gpa, {}, anyPrefilter, .{ .cases = 6000, .seed = 0x9fe });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached_prefilter});
     try testing.expect(reached_prefilter[0] > 300 and reached_prefilter[1] > 300 and reached_prefilter[2] > 300);
     // Teddy where this CPU has a kernel for it.
@@ -955,6 +962,8 @@ var suffixed: struct { taken: usize = 0, refused: usize = 0 } = .{};
 test "fuzz: the reverse suffix strategy finds what the PikeVM finds, where it leads and where it is refused" {
     suffixed = .{};
     try shakedown.check(gpa, {}, anySuffixed, .{ .cases = 4000, .seed = 0x5ff });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{suffixed});
     try testing.expect(suffixed.taken > 500 and suffixed.refused > 500);
 }
@@ -1018,6 +1027,60 @@ var inner_reached: struct { taken: usize = 0, refused: usize = 0 } = .{};
 test "fuzz: the reverse inner strategy finds what the PikeVM finds, where it leads and where it is refused" {
     inner_reached = .{};
     try shakedown.check(gpa, {}, anyInner, .{ .cases = 4000, .seed = 0x1a3e });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{inner_reached});
     try testing.expect(inner_reached.taken > 500 and inner_reached.refused > 500);
+}
+
+// The whole pipeline on any bytes.
+
+fn anyBytes(_: void, case: *shakedown.Case) !void {
+    const s = case.source;
+    var state: std.heap.ArenaAllocator = .init(case.gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    const pattern = try a.alloc(u8, shakedown.gen.intRange(s, usize, 0, 24));
+    for (pattern) |*b| b.* = shakedown.gen.intRange(s, u8, 0, 255);
+    const options = [_]Syntax{ .{}, .{ .unicode = false }, .{ .unicode = false, .utf8 = false }, ecma, .{ .dialect = .ecmascript, .unicode = false }, .{ .dialect = .ecmascript, .unicode_sets = true } };
+    const syntax = options[shakedown.gen.intRange(s, usize, 0, options.len - 1)];
+    const haystack = try a.alloc(u8, shakedown.gen.intRange(s, usize, 0, 32));
+    for (haystack) |*b| b.* = shakedown.gen.intRange(s, u8, 0, 255);
+    case.note("{any} {any} on {any}", .{ pattern, syntax, haystack });
+    var d: Regex.Diagnostic = .{};
+    var re = Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntax, .diagnostic = &d }) catch |err| switch (err) {
+        error.Invalid, error.Unsupported, error.TooLarge => {
+            // Every refusal says where and why, inside the pattern.
+            try testing.expect(d.reason != .none and d.span.start <= d.span.end and d.span.end <= pattern.len);
+            return;
+        },
+        error.OutOfMemory => return err,
+    };
+    defer re.deinit();
+    var alone = try Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntax, .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
+    defer alone.deinit();
+    var cache = try re.cache(case.gpa);
+    defer cache.deinit(case.gpa);
+    var alone_cache = try alone.cache(case.gpa);
+    defer alone_cache.deinit(case.gpa);
+    try testing.expectEqual(alone.find(&alone_cache, .of(haystack)), re.find(&cache, .of(haystack)));
+    try testing.expectEqual(alone.isMatch(&alone_cache, haystack), re.isMatch(&cache, haystack));
+    const groups = try a.alloc(?Regex.Span, re.captureCount());
+    const alone_groups = try a.alloc(?Regex.Span, re.captureCount());
+    try testing.expectEqual(alone.captures(&alone_cache, .of(haystack), alone_groups), re.captures(&cache, .of(haystack), groups));
+    var it = re.findAll(&cache, haystack);
+    var count: usize = 0;
+    while (it.next()) |_| count += 1;
+    try testing.expect(count <= haystack.len + 1);
+    compiled_bytes += 1;
+}
+
+var compiled_bytes: usize = 0;
+
+test "fuzz: any bytes as a pattern in any dialect are refused by name, or compile to engines that agree with the PikeVM alone" {
+    compiled_bytes = 0;
+    try shakedown.check(gpa, {}, anyBytes, .{ .cases = 4000, .seed = 0xb17e });
+    // Under Zig's fuzzer the property runs the fuzzer's inputs, not these cases: nothing to count.
+    if (fuzzing) return;
+    try testing.expect(compiled_bytes > 300);
 }
