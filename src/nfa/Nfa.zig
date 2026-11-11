@@ -37,6 +37,8 @@ looks: LookSet,
 utf8: bool,
 /// Some match is empty: a search in UTF-8 checks where such a match ends.
 empty_ok: bool,
+/// Every match ends at the haystack's end (`\z`, or a `$` that is no line's).
+end_anchored: bool,
 /// Some state is a `loop_begin` or `loop_end`: each thread carries whether it read a byte since
 /// its innermost `loop_begin`, and is told apart by it.
 loop_checks: bool,

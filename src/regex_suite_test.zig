@@ -43,6 +43,7 @@ const Tally = struct {
     path_pikevm: usize = 0,
     path_lazy_dfa: usize = 0,
     path_lazy_dfa_fell_back: usize = 0,
+    path_reverse_anchored: usize = 0,
     /// Patterns with a lazy DFA but no reverse one.
     no_reverse_dfa: usize = 0,
     /// Matches found whose start each way found (`Regex.Cache.Start`).
@@ -63,6 +64,7 @@ const Tally = struct {
             .pikevm => tally.path_pikevm += 1,
             .lazy_dfa => tally.path_lazy_dfa += 1,
             .lazy_dfa_fell_back => tally.path_lazy_dfa_fell_back += 1,
+            .reverse_anchored => tally.path_reverse_anchored += 1,
         }
     }
 };
@@ -292,8 +294,10 @@ test "regex's own test suite, through the Rust dialect" {
         // past 0x7f where a Unicode `\b` reads code points, the PikeVM answering those.
         .no_lazy_dfa = 0,
         .path_pikevm = 4531,
-        .path_lazy_dfa = 4382,
+        .path_lazy_dfa = 4297,
         .path_lazy_dfa_fell_back = 149,
+        // A pattern whose every match ends at the end is read back from there alone.
+        .path_reverse_anchored = 85,
         // Each match's start: the reverse lazy DFA's where the lazy DFA found its end, else the
         // PikeVM's (the PikeVM's own run, and the searches the lazy DFA quit).
         .no_reverse_dfa = 0,

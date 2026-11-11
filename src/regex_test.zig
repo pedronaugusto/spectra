@@ -181,10 +181,19 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
         if (lazy.search(&re.nfa, d, &cache.lazy.?, input)) |ended| try testing.expectEqual(want_end, ended) else |_| {}
         if (lazy.search(&re.nfa, d, &cache.lazy.?, earliest)) |any| try testing.expectEqual(want_end != null, any != null) else |_| {}
     }
-    // And the public engine, on whichever path it takes.
+    // And the public engine, on whichever path it takes: the match, and every group's span.
     if (re.find(&cache, input)) |m| {
         try testing.expectEqual(want_end, m.end);
         try testing.expectEqual(want[0], m.start);
+    } else try testing.expectEqual(null, want_end);
+    const groups = try case.gpa.alloc(?Regex.Span, re.captureCount());
+    defer case.gpa.free(groups);
+    if (re.captures(&cache, input, groups)) {
+        try testing.expect(want_end != null);
+        for (groups, 0..) |g, k| {
+            const w: ?Regex.Span = if (want[2 * k]) |start| .{ .start = start, .end = want[2 * k + 1].? } else null;
+            try testing.expectEqual(w, g);
+        }
     } else try testing.expectEqual(null, want_end);
 }
 
@@ -319,7 +328,7 @@ fn visited(pattern: []const u8, syntax: Syntax, haystack: []const u8) !struct { 
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     _ = re.find(&cache, .of(haystack));
-    return .{ .visited = cache.pike.visited + cache.lazy.?.visited, .threads = pikevm.sizes(&re.nfa).threads };
+    return .{ .visited = cache.pike.visited + cache.lazy.?.visited + cache.reverse.?.visited, .threads = pikevm.sizes(&re.nfa).threads };
 }
 
 test "a search's work is linear in the haystack on what makes a backtracker exponential" {
@@ -530,7 +539,7 @@ fn iterationWork(pattern: []const u8, haystack: []const u8) !Iteration {
     var total: Iteration = .{ .work = 0, .matches = 0 };
     while (true) {
         const m = it.next();
-        total.work += cache.pike.visited + if (cache.lazy) |l| l.visited else 0;
+        total.work += cache.pike.visited + (if (cache.lazy) |l| l.visited else 0) + (if (cache.reverse) |r| r.visited else 0);
         if (m == null) break;
         total.matches += 1;
     }
@@ -558,4 +567,79 @@ test "every match in turn is linear over many matches and near misses, and quadr
     const large = try iterationWork("\\w+X|\\w", try repeatText(a, "w", 2000));
     try testing.expectEqual(@as(usize, 1000), small.matches);
     try testing.expect(large.work >= 3 * small.work and large.work <= 5 * small.work);
+}
+
+// The strategies.
+
+test "a pattern whose every match ends at the haystack's end is read back from there, and never forward" {
+    const Strategy = @import("strategy.zig").Strategy;
+    const chosen = [_]struct { pattern: []const u8, syntax: Syntax = .{}, want: Strategy }{
+        .{ .pattern = "\\w+\\z", .want = .reverse_anchored },
+        .{ .pattern = "a$|b\\z", .want = .reverse_anchored },
+        .{ .pattern = "a$", .syntax = ecma, .want = .reverse_anchored },
+        .{ .pattern = "(?m)a$", .want = .core },
+        .{ .pattern = "a$|b", .want = .core },
+        .{ .pattern = "^a$", .want = .core },
+        .{ .pattern = "a", .want = .core },
+    };
+    for (chosen) |case| {
+        var re = try compiled(case.pattern, case.syntax);
+        defer re.deinit();
+        errdefer std.debug.print("/{s}/\n", .{case.pattern});
+        try testing.expectEqual(case.want, re.strategy);
+    }
+    var re = try compiled("(\\w+)\\z", .{});
+    defer re.deinit();
+    // The work is the tail's, whatever comes before it: the states built and the bytes read, each
+    // in a cache of its own.
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var work: [2]usize = undefined;
+    for ([_]usize{ 1000, 4000 }, 0..) |n, i| {
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "ab ", n), "end" });
+        try testing.expectEqual(Regex.Span{ .start = h.len - 3, .end = h.len }, re.find(&cache, .of(h)).?);
+        try testing.expectEqual(.reverse_anchored, cache.last);
+        try testing.expectEqual(0, cache.lazy.?.visited + cache.pike.visited);
+        work[i] = cache.reverse.?.visited;
+        var groups: [2]?Regex.Span = undefined;
+        try testing.expect(re.captures(&cache, .of(h), &groups));
+        try testing.expectEqual(Regex.Span{ .start = h.len - 3, .end = h.len }, groups[1].?);
+        // A span short of the end holds no match; anchored, the match starts at the span's start.
+        try testing.expectEqual(null, re.find(&cache, .{ .haystack = h, .span = .{ .start = 0, .end = h.len - 1 } }));
+        try testing.expectEqual(null, re.find(&cache, .{ .haystack = h, .span = .{ .start = h.len - 4, .end = h.len }, .anchored = true }));
+        try testing.expectEqual(Regex.Span{ .start = h.len - 2, .end = h.len }, re.find(&cache, .{ .haystack = h, .span = .{ .start = h.len - 2, .end = h.len }, .anchored = true }).?);
+    }
+    try testing.expectEqual(work[0], work[1]);
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    try testing.expect(re.isMatch(&cache, "x end") and !re.isMatch(&cache, "end "));
+    // A quit reading back goes on as the core strategy, which says how it went.
+    var wide = try compiled("\\Bfoo\\z", .{});
+    defer wide.deinit();
+    var wide_cache = try wide.cache(gpa);
+    defer wide_cache.deinit(gpa);
+    try testing.expectEqual(Regex.Span{ .start = 2, .end = 5 }, wide.find(&wide_cache, .of("\u{e9}foo")).?);
+    try testing.expectEqual(.lazy_dfa_fell_back, wide_cache.last);
+}
+
+test "captures are the PikeVM's over the match alone where the lazy DFAs found it" {
+    var re = try compiled("(a+)(b)?", .{});
+    defer re.deinit();
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var work: [2]usize = undefined;
+    for ([_]usize{ 1000, 4000 }, 0..) |n, i| {
+        var cache = try re.cache(gpa);
+        defer cache.deinit(gpa);
+        const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "x", n), "aab" });
+        var groups: [3]?Regex.Span = undefined;
+        try testing.expect(re.captures(&cache, .of(h), &groups));
+        try testing.expectEqual(.reverse_dfa, cache.last_start);
+        try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = n, .end = n + 3 }, .{ .start = n, .end = n + 2 }, .{ .start = n + 2, .end = n + 3 } }, &groups);
+        work[i] = cache.pike.visited;
+    }
+    // The PikeVM reads the match, not what comes before it.
+    try testing.expectEqual(work[0], work[1]);
 }

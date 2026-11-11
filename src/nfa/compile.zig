@@ -101,7 +101,7 @@ const unset = std.math.maxInt(u32);
 
 const Fragment = struct { start: u32, end: u32 };
 
-const Starts = struct { anchored: u32, unanchored: u32, empty_ok: bool };
+const Starts = struct { anchored: u32, unanchored: u32, empty_ok: bool, end_anchored: bool };
 
 const Trans = struct { lo: u8, hi: u8, next: u32 };
 
@@ -166,6 +166,8 @@ const Prop = struct {
     only_empty: bool,
     /// Every match begins at the haystack's start.
     anchored: bool,
+    /// Every match ends at the haystack's end.
+    end_anchored: bool = false,
     /// The lowest and highest group it holds: a node's groups are numbered in a run.
     groups: ?[2]u32 = null,
 };
@@ -230,7 +232,7 @@ const Compiler = struct {
             const m = try c.b.add(.match);
             c.b.patch(body.end, m);
             const root = c.props[@backingInt(c.hir.root)];
-            return .{ .anchored = body.start, .unanchored = body.start, .empty_ok = root.empty_ok };
+            return .{ .anchored = body.start, .unanchored = body.start, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
         }
         const s0 = try c.b.add(.{ .capture = .{ .group = 0, .slot = 0, .next = unset } });
         const body = try c.walk(c.hir.root);
@@ -240,12 +242,12 @@ const Compiler = struct {
         c.b.patch(body.end, e0);
         c.b.patch(e0, m);
         const root = c.props[@backingInt(c.hir.root)];
-        if (root.anchored) return .{ .anchored = s0, .unanchored = s0, .empty_ok = root.empty_ok };
+        if (root.anchored) return .{ .anchored = s0, .unanchored = s0, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
         const loop = try c.b.addUnion(2, true);
         const any = try c.b.add(.{ .byte_range = .{ .lo = 0, .hi = 0xff, .next = loop } });
         c.b.patch(loop, any);
         c.b.patch(loop, s0);
-        return .{ .anchored = s0, .unanchored = loop, .empty_ok = root.empty_ok };
+        return .{ .anchored = s0, .unanchored = loop, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
     }
 
     fn properties(c: *Compiler) BuildError!void {
@@ -255,10 +257,10 @@ const Compiler = struct {
             c.props[i] = switch (node) {
                 .empty => .{ .empty_ok = true, .only_empty = true, .anchored = false },
                 .literal, .unicode_class, .byte_class => .{ .empty_ok = false, .only_empty = false, .anchored = false },
-                .look => |l| .{ .empty_ok = true, .only_empty = true, .anchored = l == .start_text },
+                .look => |l| .{ .empty_ok = true, .only_empty = true, .anchored = l == .start_text, .end_anchored = l == .end_text },
                 .repetition => |r| blk: {
                     const sub = c.prop(r.sub, i);
-                    break :blk .{ .empty_ok = r.min == 0 or sub.empty_ok, .only_empty = sub.only_empty or r.max == 0, .anchored = r.min > 0 and sub.anchored, .groups = sub.groups };
+                    break :blk .{ .empty_ok = r.min == 0 or sub.empty_ok, .only_empty = sub.only_empty or r.max == 0, .anchored = r.min > 0 and sub.anchored, .end_anchored = r.min > 0 and sub.end_anchored, .groups = sub.groups };
                 },
                 .capture => |cap| blk: {
                     var p = c.prop(cap.sub, i);
@@ -267,23 +269,26 @@ const Compiler = struct {
                 },
                 .concat => |slice| blk: {
                     var p: Prop = .{ .empty_ok = true, .only_empty = true, .anchored = false };
-                    for (c.hir.childrenOf(slice), 0..) |child, k| {
+                    const children = c.hir.childrenOf(slice);
+                    for (children, 0..) |child, k| {
                         const sub = c.prop(child, i);
                         p.empty_ok = p.empty_ok and sub.empty_ok;
                         p.only_empty = p.only_empty and sub.only_empty;
                         p.groups = joinGroups(p.groups, sub.groups);
                         if (k == 0) p.anchored = sub.anchored;
+                        if (k == children.len - 1) p.end_anchored = sub.end_anchored;
                     }
                     break :blk p;
                 },
                 .alternation => |slice| blk: {
-                    var p: Prop = .{ .empty_ok = false, .only_empty = true, .anchored = slice.len > 0 };
+                    var p: Prop = .{ .empty_ok = false, .only_empty = true, .anchored = slice.len > 0, .end_anchored = slice.len > 0 };
                     for (c.hir.childrenOf(slice)) |child| {
                         const sub = c.prop(child, i);
                         p.empty_ok = p.empty_ok or sub.empty_ok;
                         p.only_empty = p.only_empty and sub.only_empty;
                         p.groups = joinGroups(p.groups, sub.groups);
                         p.anchored = p.anchored and sub.anchored;
+                        p.end_anchored = p.end_anchored and sub.end_anchored;
                     }
                     break :blk p;
                 },
@@ -908,6 +913,7 @@ const Builder = struct {
             .looks = looks,
             .utf8 = utf8_mode,
             .empty_ok = starts.empty_ok,
+            .end_anchored = starts.end_anchored,
             .loop_checks = loop_checks,
         };
     }

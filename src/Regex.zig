@@ -1,12 +1,14 @@
 //! A compiled pattern: is-match, find, captures and every match in turn. Immutable once
 //! compiled, so any number of threads search it, each with a `Cache` of its own.
 //!
-//! Engines: the lazy DFA finds whether there is a match and where the leftmost-first one ends;
-//! the reverse lazy DFA, read back from that end, where it starts; the PikeVM, over the span cut
-//! at that end, finds its captures, and its start where the reverse lazy DFA quits or gives up.
-//! Where the lazy DFA quits or gives up, the PikeVM searches the whole span from its start; a
-//! pattern with no lazy DFA (`engines`) is the PikeVM's alone. Each engine is linear in the
-//! haystack and the automaton, and is tested against the others.
+//! Engines (`strategy.zig` chooses how they are put together): the lazy DFA finds whether there
+//! is a match and where the leftmost-first one ends; the reverse lazy DFA, read back from that
+//! end, where it starts; the PikeVM, anchored over the match, its captures. Where the reverse
+//! lazy DFA quits or gives up, the PikeVM searches the span cut at the end; where the lazy DFA
+//! does, the whole span from its start; a pattern with no lazy DFA (`engines`) is the PikeVM's
+//! alone. A pattern whose every match ends at the haystack's end is read back from there and
+//! never forward. Each engine is linear in the haystack and the automaton, and is tested
+//! against the others.
 const Regex = @This();
 const std = @import("std");
 const aegis = @import("aegis");
@@ -22,6 +24,7 @@ const Nfa = @import("nfa/Nfa.zig");
 const compile_mod = @import("nfa/compile.zig");
 const pikevm = @import("pikevm.zig");
 const lazy = @import("lazy.zig");
+const strategy_mod = @import("strategy.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -34,6 +37,8 @@ dfa: ?lazy.Dfa,
 /// The automaton of the matches read backwards and its lazy DFA; null without a forward lazy
 /// DFA, or where either is past its limit.
 reverse: ?Reverse,
+/// How searches put the engines together, chosen from the automaton and the engines it has.
+strategy: strategy_mod.Strategy,
 
 const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
@@ -72,7 +77,8 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse };
+    const strategy = strategy_mod.choose(&nfa, dfa != null, reverse != null);
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy };
 }
 
 /// The reverse automaton and its lazy DFA, or null where the automaton passes `Limits.nfa` (a
@@ -135,7 +141,6 @@ pub const Cache = struct {
     reverse: ?lazy.Cache,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
-    /// How the last `find` found where its match starts.
     last_start: Start = .pikevm,
 
     pub const Path = enum {
@@ -146,8 +151,13 @@ pub const Cache = struct {
         lazy_dfa,
         /// The lazy DFA quit or gave up, and the PikeVM searched the span from its start.
         lazy_dfa_fell_back,
+        /// `Strategy.reverse_anchored`: the reverse lazy DFA from the end, and nothing forward
+        /// (and the PikeVM over the match where captures were asked). Where it quits or gives
+        /// up, the search goes on as `core`, and says so in its own path.
+        reverse_anchored,
     };
 
+    /// How the last `find` or `captures` found where its match starts.
     pub const Start = enum {
         /// The PikeVM, over the span cut at the match's end.
         pikevm,
@@ -179,8 +189,6 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
 /// cut starts where the lazy DFA's last search began: past the span's start where an empty
 /// match there split a code point.
 fn narrowed(re: *const Regex, c: *Cache, input: Input) ?Input {
-    c.pike.visited = 0;
-    if (c.reverse) |*r| r.visited = 0;
     const d = if (re.dfa) |*d| d else {
         c.last = .pikevm;
         return input;
@@ -210,9 +218,44 @@ pub fn captureIndex(re: *const Regex, name: []const u8) ?u32 {
     return null;
 }
 
+/// Where the leftmost-first match in `input` is: nowhere, the span itself where the lazy DFAs
+/// found both ends, or a span the PikeVM must search for it.
+const Located = union(enum) {
+    none,
+    span: Span,
+    search: Input,
+};
+
+fn locate(re: *const Regex, c: *Cache, input: Input) Located {
+    c.pike.visited = 0;
+    if (c.lazy) |*l| l.visited = 0;
+    if (c.reverse) |*r| r.visited = 0;
+    c.last_start = .pikevm;
+    if (re.strategy == .reverse_anchored) {
+        const r = &re.reverse.?;
+        if (strategy_mod.reverseAnchored(&r.nfa, &r.dfa, &c.reverse.?, input)) |found| {
+            c.last = .reverse_anchored;
+            c.last_start = .reverse_dfa;
+            return if (found) |span| .{ .span = span } else .none;
+        } else |_| {}
+    }
+    const cut = re.narrowed(c, input) orelse return .none;
+    if (c.last == .lazy_dfa) if (re.reverse) |*r| {
+        // The match the lazy DFA found ends at the cut and starts in it: the reverse lazy DFA
+        // finds that start, the earliest of any match ending there.
+        if (lazy.searchReverse(&r.nfa, &r.dfa, &c.reverse.?, cut)) |start| {
+            c.last_start = .reverse_dfa;
+            return .{ .span = .{ .start = start orelse aegis.assert.never("a match ending at the cut starts in it"), .end = cut.span.end } };
+        } else |_| c.last_start = .reverse_dfa_fell_back;
+    };
+    return .{ .search = cut };
+}
+
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
     var input: Input = .of(haystack);
+    if (re.strategy == .reverse_anchored) return re.find(c, input) != null;
     input.earliest = true;
+    c.pike.visited = 0;
     const cut = re.narrowed(c, input) orelse return false;
     if (c.last == .lazy_dfa) return true;
     return pikevm.search(&re.nfa, &c.pike, cut, &.{}) != null;
@@ -221,27 +264,38 @@ pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) bool {
 /// The leftmost-first match.
 pub fn find(re: *const Regex, c: *Cache, input: Input) ?Span {
     var slots: [2]?usize = undefined;
-    c.last_start = .pikevm;
-    const cut = re.narrowed(c, input) orelse return null;
-    if (c.last == .lazy_dfa) if (re.reverse) |*r| {
-        // The match the lazy DFA found ends at the cut and starts in it: the reverse lazy DFA
-        // finds that start, the earliest of any match ending there.
-        if (lazy.searchReverse(&r.nfa, &r.dfa, &c.reverse.?, cut)) |start| {
-            c.last_start = .reverse_dfa;
-            return .{ .start = start orelse aegis.assert.never("a match ending at the cut starts in it"), .end = cut.span.end };
-        } else |_| c.last_start = .reverse_dfa_fell_back;
+    const cut = switch (re.locate(c, input)) {
+        .none => return null,
+        .span => |span| return span,
+        .search => |cut| cut,
     };
     _ = pikevm.search(&re.nfa, &c.pike, cut, &slots) orelse return null;
     return .{ .start = slots[0].?, .end = slots[1].? };
 }
 
 /// The leftmost-first match with each group's span in `out`, null where a group took no part.
-/// `out.len == captureCount()` is the caller's contract.
+/// `out.len == captureCount()` is the caller's contract. Where the lazy DFAs found the match,
+/// the PikeVM searches it alone, anchored at its start: the preferred match from there ends
+/// where they said, so its captures are the leftmost-first match's.
 pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
     aegis.assert.invariant(out.len == re.nfa.groups, "a capture slice holds one span per group");
     const slots = c.pike.slots;
-    const cut = re.narrowed(c, input) orelse return false;
-    _ = pikevm.search(&re.nfa, &c.pike, cut, slots) orelse return false;
+    const located = re.locate(c, input);
+    const cut = switch (located) {
+        .none => return false,
+        .span => |span| blk: {
+            var only = input;
+            only.span = span;
+            only.anchored = true;
+            break :blk only;
+        },
+        .search => |cut| cut,
+    };
+    const end = pikevm.search(&re.nfa, &c.pike, cut, slots) orelse {
+        aegis.assert.invariant(located != .span, "the PikeVM finds the match the lazy DFAs found");
+        return false;
+    };
+    if (located == .span) aegis.assert.invariant(end == located.span.end and slots[0].? == located.span.start, "the PikeVM's match is the one the lazy DFAs found");
     for (out, 0..) |*span, g| {
         span.* = if (slots[2 * g]) |start| .{ .start = start, .end = slots[2 * g + 1].? } else null;
     }
