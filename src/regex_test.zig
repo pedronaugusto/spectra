@@ -9,6 +9,7 @@ const Syntax = @import("Syntax.zig");
 const pikevm = @import("pikevm.zig");
 const backtrack = @import("testing/backtrack.zig");
 const bounded = @import("backtrack.zig");
+const onepass = @import("onepass.zig");
 const lazy = @import("lazy.zig");
 const grammar = @import("testing/grammar.zig");
 const testing = std.testing;
@@ -181,6 +182,12 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
     var earliest = input;
     earliest.earliest = true;
     try testing.expectEqual(want_end != null, pikevm.search(&re.nfa, &cache.pike, earliest, &.{}) != null);
+    // The one-pass DFA, anchored, finds the same, every slot.
+    if (re.onepass) |*d| if (anchored) {
+        try testing.expectEqual(want_end, onepass.search(d, input, got));
+        if (want_end != null) try testing.expectEqualSlices(?usize, want, got);
+        agreed.onepass += 1;
+    };
     // The bounded backtracker finds the same, every slot, where the span fits its bits, or its
     // stack fills.
     if (re.backtracker) |b| if (hi - lo <= b.longest().?) {
@@ -214,14 +221,14 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
 }
 
 /// What the fuzz above reached of the bounded backtracker.
-var agreed: struct { backtracked: usize = 0, deep: usize = 0, too_long: usize = 0 } = .{};
+var agreed: struct { backtracked: usize = 0, deep: usize = 0, too_long: usize = 0, onepass: usize = 0 } = .{};
 
 test "fuzz: the PikeVM's match and captures are the backtracker's" {
     agreed = .{};
     try shakedown.check(gpa, {}, anyAgreement, .{ .cases = 5000, .seed = 0x91e });
     errdefer std.debug.print("{any}\n", .{agreed});
     // Spans here are short: the one too long for the bits is the test below's.
-    try testing.expect(agreed.backtracked > 1000 and agreed.deep > 100);
+    try testing.expect(agreed.backtracked > 1000 and agreed.deep > 100 and agreed.onepass > 300);
 }
 
 // The lazy DFA against the PikeVM.
@@ -431,7 +438,7 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     const pattern = "(a|b)*a(a|b){20}";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0) } });
+    var alone = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) } });
     defer alone.deinit();
     try testing.expect(re.engines().lazy_dfa and !alone.engines().lazy_dfa);
     var alone_cache = try alone.cache(gpa);
@@ -465,7 +472,7 @@ test "a reverse lazy DFA that gives up leaves the start to the PikeVM, over the 
     const pattern = "(a|b){20}a(a|b)*";
     var re = try Regex.compile(gpa, .init(pattern), .{ .limits = .{ .lazy_dfa = .literal("64KiB") } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true }, re.engines());
     const big = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(big);
     var prng: std.Random.DefaultPrng = .init(0x7e5e);
@@ -538,14 +545,14 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
 test "a store too small for the fewest states leaves the pattern no lazy DFA, and says so" {
     var re = try Regex.compile(gpa, .init("a+b"), .{ .limits = .{ .lazy_dfa = .fromRaw(64) } });
     defer re.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true }, re.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true, .onepass = true }, re.engines());
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
     try testing.expectEqual(Regex.Span{ .start = 1, .end = 4 }, re.find(&cache, .of("xaab")).?);
     try testing.expectEqual(.pikevm, cache.last);
     var roomy = try Regex.compile(gpa, .init("a+b"), .{});
     defer roomy.deinit();
-    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true }, roomy.engines());
+    try testing.expectEqual(Regex.Engines{ .lazy_dfa = true, .reverse_dfa = true, .backtrack = true, .onepass = true }, roomy.engines());
 }
 
 // Every match in turn, counted.
@@ -648,7 +655,8 @@ test "a pattern whose every match ends at the haystack's end is read back from t
 }
 
 test "captures are the backtracker's over the match alone where the lazy DFAs found it" {
-    var re = try compiled("(a+)(b)?", .{});
+    // Not one-pass: `a` leads two ways.
+    var re = try compiled("(a|ab)(c|bcd)?", .{});
     defer re.deinit();
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -656,12 +664,12 @@ test "captures are the backtracker's over the match alone where the lazy DFAs fo
     for ([_]usize{ 1000, 4000 }, 0..) |n, i| {
         var cache = try re.cache(gpa);
         defer cache.deinit(gpa);
-        const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "x", n), "aab" });
+        const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "x", n), "abcd" });
         var groups: [3]?Regex.Span = undefined;
         try testing.expect(re.captures(&cache, .of(h), &groups));
         try testing.expectEqual(.reverse_dfa, cache.last_start);
         try testing.expectEqual(.backtrack, cache.last_slots);
-        try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = n, .end = n + 3 }, .{ .start = n, .end = n + 2 }, .{ .start = n + 2, .end = n + 3 } }, &groups);
+        try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = n, .end = n + 4 }, .{ .start = n, .end = n + 1 }, .{ .start = n + 1, .end = n + 4 } }, &groups);
         try testing.expectEqual(0, cache.pike.visited);
         work[i] = cache.back.?.explored;
     }
@@ -691,7 +699,7 @@ test "the bounded backtracker explores each state and position once, and leaves 
         try testing.expect(cache.back.?.explored <= re.backtracker.?.threads * (h.len + 1));
     }
     // A span longer than the bits hold is the PikeVM's; one that fits, the backtracker's.
-    var re = try Regex.compile(gpa, .init("(a+)"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
+    var re = try Regex.compile(gpa, .init("(a|ab)+"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
     defer re.deinit();
     var cache = try re.cache(gpa);
     defer cache.deinit(gpa);
@@ -699,15 +707,15 @@ test "the bounded backtracker explores each state and position once, and leaves 
     var a: std.heap.ArenaAllocator = .init(gpa);
     defer a.deinit();
     var groups: [2]?Regex.Span = undefined;
-    const short = try repeatText(a.allocator(), "a", 10);
+    const short = try repeatText(a.allocator(), "a", 4);
     try testing.expect(re.captures(&cache, .of(short), &groups));
     try testing.expectEqual(.backtrack, cache.last_slots);
     const long = try repeatText(a.allocator(), "a", longest + 1);
     try testing.expect(re.captures(&cache, .of(long), &groups));
     try testing.expectEqual(.pikevm, cache.last_slots);
-    try testing.expectEqual(Regex.Span{ .start = 0, .end = long.len }, groups[1].?);
-    // `(a)*` waits on one alternative per a: past the stack, the PikeVM answers.
-    var deep = try Regex.compile(gpa, .init("(a)*"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
+    try testing.expectEqual(Regex.Span{ .start = long.len - 1, .end = long.len }, groups[1].?);
+    // `(a|ab)*` waits on two alternatives per a: past the stack, the PikeVM answers.
+    var deep = try Regex.compile(gpa, .init("(a|ab)*"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
     defer deep.deinit();
     var deep_cache = try deep.cache(gpa);
     defer deep_cache.deinit(gpa);
@@ -715,4 +723,44 @@ test "the bounded backtracker explores each state and position once, and leaves 
     try testing.expect(deep.captures(&deep_cache, .of(run), &groups));
     try testing.expectEqual(.backtrack_fell_back, deep_cache.last_slots);
     try testing.expectEqual(Regex.Span{ .start = run.len - 1, .end = run.len }, groups[1].?);
+}
+
+// The one-pass DFA.
+
+test "a one-pass pattern's captures follow one path; a pattern where a byte leads two ways has no one-pass DFA" {
+    for ([_]struct { pattern: []const u8, syntax: Syntax = .{}, onepass: bool }{
+        .{ .pattern = "(\\w+)-(\\d+)", .onepass = true },
+        .{ .pattern = "a+b", .onepass = true },
+        .{ .pattern = "(a)(b)?", .onepass = true },
+        .{ .pattern = "(?i)([a-z]+)@([a-z]+)\\.com", .onepass = true },
+        .{ .pattern = "\\bfoo\\b", .onepass = true },
+        .{ .pattern = "(a|ab)", .onepass = false },
+        .{ .pattern = "\\ba|a", .onepass = false },
+        .{ .pattern = "(a*)*", .onepass = false },
+        .{ .pattern = "(\\w+)(\\d+)", .onepass = false },
+        // ECMAScript's iterations clear their captures: not a path's alone.
+        .{ .pattern = "(a)*", .syntax = ecma, .onepass = false },
+        .{ .pattern = "(a)*", .onepass = true },
+    }) |case| {
+        var re = try compiled(case.pattern, case.syntax);
+        defer re.deinit();
+        errdefer std.debug.print("/{s}/\n", .{case.pattern});
+        try testing.expectEqual(case.onepass, re.engines().onepass);
+    }
+    // Leftmost-first: greedy, the b is taken over the match; lazy, the match wins.
+    for ([_]struct { pattern: []const u8, end: usize }{ .{ .pattern = "ab?", .end = 2 }, .{ .pattern = "ab??", .end = 1 } }) |case| {
+        var re = try compiled(case.pattern, .{});
+        defer re.deinit();
+        var slots: [2]?usize = undefined;
+        try testing.expectEqual(case.end, onepass.search(&re.onepass.?, .of("ab"), &slots).?);
+    }
+    // Through the public engine: the lazy DFAs find the match, the one-pass DFA its groups.
+    var re = try compiled("(\\w+)-(\\d+)", .{});
+    defer re.deinit();
+    var cache = try re.cache(gpa);
+    defer cache.deinit(gpa);
+    var groups: [3]?Regex.Span = undefined;
+    try testing.expect(re.captures(&cache, .of("id: abc-123!"), &groups));
+    try testing.expectEqual(.onepass, cache.last_slots);
+    try testing.expectEqualSlices(?Regex.Span, &.{ .{ .start = 4, .end = 11 }, .{ .start = 4, .end = 7 }, .{ .start = 8, .end = 11 } }, &groups);
 }

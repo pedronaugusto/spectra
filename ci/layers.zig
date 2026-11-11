@@ -6,7 +6,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "syntax", .patterns = &.{ "src/syntax/Ast.zig", "src/syntax/diagnostic.zig", "src/syntax/parse.zig", "src/syntax/ecma.zig" } },
     .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig" } },
     .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/look.zig", "src/nfa/compile.zig" } },
-    .{ .name = "engines", .patterns = &.{ "src/pikevm.zig", "src/lazy.zig", "src/backtrack.zig" } },
+    .{ .name = "engines", .patterns = &.{ "src/pikevm.zig", "src/lazy.zig", "src/backtrack.zig", "src/onepass.zig" } },
     .{ .name = "meta", .patterns = &.{ "src/Regex.zig", "src/strategy.zig" } },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
@@ -48,6 +48,7 @@ pub const required = [_][]const u8{
     "src/pikevm.zig",
     "src/lazy.zig",
     "src/backtrack.zig",
+    "src/onepass.zig",
     "src/Regex.zig",
     "src/strategy.zig",
     "src/spectra.zig",

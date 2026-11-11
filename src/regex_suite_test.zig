@@ -54,6 +54,7 @@ const Tally = struct {
     slots_pikevm: usize = 0,
     slots_backtrack: usize = 0,
     slots_backtrack_fell_back: usize = 0,
+    slots_onepass: usize = 0,
 
     fn countStart(tally: *Tally, start: Regex.Cache.Start) void {
         switch (start) {
@@ -193,6 +194,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
     if (engines == .pikevm) {
         limits.lazy_dfa = .fromRaw(0);
         limits.backtrack = .fromRaw(0);
+        limits.onepass = .fromRaw(0);
     }
     var re = Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntax, .limits = limits, .diagnostic = &d }) catch |err| {
         if (flag(t, "compiles", true)) {
@@ -207,7 +209,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         tally.automata = std.hash.Wyhash.hash(tally.automata, try nfa_dump.dump(a, &re.nfa));
         if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
         if (re.engines().lazy_dfa and !re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa or re.engines().backtrack) {
+    } else if (re.engines().lazy_dfa or re.engines().reverse_dfa or re.engines().backtrack or re.engines().onepass) {
         std.debug.print("{s}/{s}: /{s}/ has a lazy DFA in no store\n", .{ file, name, pattern });
         tally.failed += 1;
         return false;
@@ -263,6 +265,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
             .pikevm => tally.slots_pikevm += 1,
             .backtrack => tally.slots_backtrack += 1,
             .backtrack_fell_back => tally.slots_backtrack_fell_back += 1,
+            .onepass => tally.slots_onepass += 1,
         }
         const w = want.matches[k];
         const compared = if (want.groups_given) groups else groups[0..1];
@@ -318,7 +321,8 @@ test "regex's own test suite, through the Rust dialect" {
         .start_reverse_dfa_fell_back = 0,
         // Captures: the backtracker's on the default path, the PikeVM's on its own.
         .slots_pikevm = 1528,
-        .slots_backtrack = 1528,
+        .slots_backtrack = 609,
         .slots_backtrack_fell_back = 0,
+        .slots_onepass = 919,
     }, tally);
 }

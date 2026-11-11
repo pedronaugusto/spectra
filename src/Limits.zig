@@ -24,5 +24,8 @@ lazy_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),
 /// spans it searches (`Regex` gives longer ones to the PikeVM); a quarter is its stack, and a
 /// search that outgrows it is the PikeVM's too. Zero: no backtracker.
 backtrack: aegis.units.Bytes(usize) = .literal("256KiB"),
+/// The one-pass DFA's table, built at compile and kept in the `Regex`: a pattern whose table is
+/// larger has none, and its captures are the backtracker's or the PikeVM's.
+onepass: aegis.units.Bytes(usize) = .literal("1MiB"),
 /// The largest dense DFA built ahead.
 dense_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),

@@ -71,6 +71,7 @@ const Tally = struct {
     slots_backtrack: usize = 0,
     slots_backtrack_fell_back: usize = 0,
     slots_pikevm: usize = 0,
+    slots_onepass: usize = 0,
 };
 
 fn codeUnits(case: Case) bool {
@@ -129,9 +130,9 @@ test "V8's verdicts, through the ECMAScript dialect" {
             errdefer re.deinit();
             if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
             if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
-            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0) } });
+            var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) } });
             errdefer alone.deinit();
-            try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack);
+            try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack and !alone.engines().onepass);
             const ast = try a.create(@import("syntax/Ast.zig"));
             ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
             const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
@@ -147,6 +148,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .pikevm => tally.slots_pikevm += 1,
             .backtrack => tally.slots_backtrack += 1,
             .backtrack_fell_back => tally.slots_backtrack_fell_back += 1,
+            .onepass => tally.slots_onepass += 1,
         };
         switch (cache.last) {
             .pikevm => {},
@@ -222,10 +224,12 @@ test "V8's verdicts, through the ECMAScript dialect" {
         .start_reverse_dfa_fell_back = 0,
         .start_pikevm = 40,
         .no_reverse_dfa = 0,
-        // Every case's captures are the backtracker's, the PikeVM alone saying the same.
-        .slots_backtrack = 3241,
+        // Every case's captures are the one-pass DFA's or the backtracker's, the PikeVM alone
+        // saying the same.
+        .slots_backtrack = 837,
         .slots_backtrack_fell_back = 0,
         .slots_pikevm = 0,
+        .slots_onepass = 2404,
     }, tally);
 }
 
