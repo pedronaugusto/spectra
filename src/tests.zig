@@ -8,6 +8,7 @@ test {
     _ = @import("hir/literals_test.zig");
     _ = @import("nfa/compile_test.zig");
     _ = @import("regex_test.zig");
+    _ = @import("set_test.zig");
     _ = @import("regex_suite_test.zig");
     _ = @import("ecma_verdicts_test.zig");
     _ = @import("testing/ecma.zig");

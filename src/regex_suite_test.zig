@@ -47,6 +47,7 @@ const Tally = struct {
     path_literal: usize = 0,
     path_reverse_suffix: usize = 0,
     path_reverse_inner: usize = 0,
+    path_whole: usize = 0,
     /// Searches where the lazy DFA's prefilter skipped ahead.
     prefiltered: usize = 0,
     /// Patterns with a lazy DFA but no reverse one.
@@ -80,6 +81,7 @@ const Tally = struct {
             .literal => tally.path_literal += 1,
             .reverse_suffix => tally.path_reverse_suffix += 1,
             .reverse_inner => tally.path_reverse_inner += 1,
+            .whole => tally.path_whole += 1,
         }
     }
 };

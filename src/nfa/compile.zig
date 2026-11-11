@@ -77,7 +77,7 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
     // Reversed, only the strings count: Rust's repetitions match the same ones (the file's doc).
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse }, .reverse = options.reverse };
+    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse }, .reverse = options.reverse, .captures = !options.reverse };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
@@ -86,7 +86,53 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
         error.TooLarge => return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge),
         error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookahead, error.Unsupported),
     };
-    return c.b.finish(gpa, c.scratch, starts, hir, options.utf8);
+    return c.b.finish(gpa, c.scratch, starts, hir, options.utf8, 1);
+}
+
+/// The automaton of a set: each pattern's match in its own match state (`.match` its index),
+/// no groups but the whole match, an anchored start choosing among the patterns in index order,
+/// and an unanchored one before it. `Limits.nfa` bounds the whole. A refusal points at the
+/// set as a whole (`options.span`).
+pub fn compileSet(gpa: Allocator, hirs: []const Hir, options: Options, diagnostic: ?*Diagnostic) Error!Nfa {
+    aegis.assert.invariant(!options.reverse, "a set's automaton reads forward");
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    var charged: Charged = .{ .child = scratch.allocator(), .left = options.limits.nfa.raw() };
+    var b: Builder = .{ .gpa = charged.allocator() };
+    const starts = runSet(scratch.allocator(), &b, hirs, options.ecma) catch |err| switch (err) {
+        error.OutOfMemory => if (charged.over)
+            return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
+        else
+            return error.OutOfMemory,
+        error.TooLarge => return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge),
+        error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookahead, error.Unsupported),
+    };
+    return b.finish(gpa, scratch.allocator(), starts, null, options.utf8, @intCast(hirs.len));
+}
+
+fn runSet(scratch: Allocator, b: *Builder, hirs: []const Hir, ecma: bool) BuildError!Starts {
+    aegis.assert.invariant(hirs.len > 0, "a set holds a pattern");
+    const heads = try scratch.alloc(u32, hirs.len);
+    var empty_ok = false;
+    var end_anchored = true;
+    var anchored = true;
+    for (hirs, heads, 0..) |*hir, *head, i| {
+        var c: Compiler = .{ .scratch = scratch, .b = b.*, .hir = hir, .repeats = .{ .ecma = ecma }, .reverse = false, .captures = false };
+        defer b.* = c.b;
+        try c.properties();
+        head.* = try c.pattern(@intCast(i));
+        const root = c.props[@backingInt(hir.root)];
+        empty_ok = empty_ok or root.empty_ok;
+        end_anchored = end_anchored and root.end_anchored;
+        anchored = anchored and root.anchored;
+    }
+    var start = heads[0];
+    if (heads.len > 1) {
+        start = try b.addUnion(heads.len, false);
+        for (heads) |head| b.patch(start, head);
+    }
+    const unanchored = if (anchored) start else try b.unanchored(start);
+    return .{ .anchored = start, .unanchored = unanchored, .empty_ok = empty_ok, .end_anchored = end_anchored };
 }
 
 fn refuse(diagnostic: ?*Diagnostic, span: Ast.Span, reason: Reason, err: Error) Error {
@@ -124,7 +170,7 @@ const BState = union(enum) {
     loop_begin: u32,
     loop_end: u32,
     fail,
-    match,
+    match: u32,
 };
 
 /// What a repetition means, which the dialect chooses: here, and nowhere else.
@@ -214,6 +260,8 @@ const Compiler = struct {
     hir: *const Hir,
     repeats: Repeats,
     reverse: bool,
+    /// Whether groups past the whole match are compiled: not reversed, nor in a set.
+    captures: bool,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
@@ -229,25 +277,28 @@ const Compiler = struct {
         if (c.reverse) {
             // Anchored at the match's end, where the reverse search starts; no captures.
             const body = try c.walk(c.hir.root);
-            const m = try c.b.add(.match);
+            const m = try c.b.add(.{ .match = 0 });
             c.b.patch(body.end, m);
             const root = c.props[@backingInt(c.hir.root)];
             return .{ .anchored = body.start, .unanchored = body.start, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
         }
+        const s0 = try c.pattern(0);
+        const root = c.props[@backingInt(c.hir.root)];
+        if (root.anchored) return .{ .anchored = s0, .unanchored = s0, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
+        return .{ .anchored = s0, .unanchored = try c.b.unanchored(s0), .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
+    }
+
+    /// The pattern's match, group 0's capture around it, ending in the match state of pattern
+    /// `index`: where an anchored search of it starts.
+    fn pattern(c: *Compiler, index: u32) BuildError!u32 {
         const s0 = try c.b.add(.{ .capture = .{ .group = 0, .slot = 0, .next = unset } });
         const body = try c.walk(c.hir.root);
         const e0 = try c.b.add(.{ .capture = .{ .group = 0, .slot = 1, .next = unset } });
-        const m = try c.b.add(.match);
+        const m = try c.b.add(.{ .match = index });
         c.b.patch(s0, body.start);
         c.b.patch(body.end, e0);
         c.b.patch(e0, m);
-        const root = c.props[@backingInt(c.hir.root)];
-        if (root.anchored) return .{ .anchored = s0, .unanchored = s0, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
-        const loop = try c.b.addUnion(2, true);
-        const any = try c.b.add(.{ .byte_range = .{ .lo = 0, .hi = 0xff, .next = loop } });
-        c.b.patch(loop, any);
-        c.b.patch(loop, s0);
-        return .{ .anchored = s0, .unanchored = loop, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
+        return s0;
     }
 
     fn properties(c: *Compiler) BuildError!void {
@@ -333,7 +384,7 @@ const Compiler = struct {
                     const id = try c.b.add(.{ .look = .{ .look = l, .next = unset } });
                     return .{ .start = id, .end = id };
                 },
-                .capture => |cap| if (c.reverse) {
+                .capture => |cap| if (!c.captures) {
                     index = cap.sub;
                     continue;
                 },
@@ -432,7 +483,7 @@ const Compiler = struct {
                     }
                     return .{ .finished = try c.repeat(f.*, r, template) };
                 }
-                if (c.repeats.clears() and (f.max orelse 2) > 1) if (c.props[@backingInt(r.sub)].groups) |g| {
+                if (c.captures and c.repeats.clears() and (f.max orelse 2) > 1) if (c.props[@backingInt(r.sub)].groups) |g| {
                     const first = std.math.mul(u32, g[0], 2) catch return error.TooLarge;
                     const end = std.math.add(u32, std.math.mul(u32, g[1], 2) catch return error.TooLarge, 2) catch return error.TooLarge;
                     f.clear = try c.b.add(.{ .clear = .{ .first = first, .end = end, .next = unset } });
@@ -685,6 +736,15 @@ const Builder = struct {
         return @intCast(b.states.items.len);
     }
 
+    /// A lazy `(?s-u:.)*?` before `start`: where an unanchored search starts.
+    fn unanchored(b: *Builder, start: u32) BuildError!u32 {
+        const loop = try b.addUnion(2, true);
+        const any = try b.add(.{ .byte_range = .{ .lo = 0, .hi = 0xff, .next = loop } });
+        b.patch(loop, any);
+        b.patch(loop, start);
+        return loop;
+    }
+
     fn room(have: usize, more: usize) error{TooLarge}!void {
         if (more >= unset - have) return error.TooLarge;
     }
@@ -776,14 +836,15 @@ const Builder = struct {
                     break :blk .{ .alternation = .{ .start = start, .len = u.len, .filled = u.filled, .lazy = u.lazy } };
                 },
                 .fail => .fail,
-                .match => .match,
+                .match => |p| .{ .match = p },
             };
             try b.states.append(b.gpa, moved);
         }
     }
 
     /// The automaton: empty states gone, each reference to one taken to the state it leads to.
-    fn finish(b: *Builder, gpa: Allocator, scratch: Allocator, starts: Starts, hir: *const Hir, utf8_mode: bool) Error!Nfa {
+    /// `hir` names the groups; null, a set's, has only the whole match.
+    fn finish(b: *Builder, gpa: Allocator, scratch: Allocator, starts: Starts, named: ?*const Hir, utf8_mode: bool, patterns: u32) Error!Nfa {
         const states = b.states.items;
         const remap = try scratch.alloc(u32, states.len);
         var count: u32 = 0;
@@ -872,17 +933,19 @@ const Builder = struct {
                 .loop_begin => |next| .{ .loop_begin = map.id(next) },
                 .loop_end => |next| .{ .loop_end = map.id(next) },
                 .fail => .fail,
-                .match => .match,
+                .match => |p| .{ .match = p },
             };
             out_states[r] = out;
         }
 
-        const groups = hir.captures + 1;
+        const no_nodes: []const Hir.Node = &.{};
+        const nodes = if (named) |h| h.nodes else no_nodes;
+        const groups = if (named) |h| h.captures + 1 else 1;
         const names = try gpa.alloc(?[]const u8, groups);
         errdefer gpa.free(names);
         @memset(names, null);
         var name_len: usize = 0;
-        for (hir.nodes) |node| switch (node) {
+        for (nodes) |node| switch (node) {
             .capture => |cap| if (cap.name) |name| {
                 name_len += name.len;
             },
@@ -891,7 +954,7 @@ const Builder = struct {
         const name_bytes = try gpa.alloc(u8, name_len);
         errdefer gpa.free(name_bytes);
         var n_at: usize = 0;
-        for (hir.nodes) |node| switch (node) {
+        for (nodes) |node| switch (node) {
             .capture => |cap| if (cap.name) |name| {
                 aegis.assert.invariant(cap.index < groups, "a group's number is one the pattern counts");
                 @memcpy(name_bytes[n_at..][0..name.len], name);
@@ -915,6 +978,7 @@ const Builder = struct {
             .empty_ok = starts.empty_ok,
             .end_anchored = starts.end_anchored,
             .loop_checks = loop_checks,
+            .patterns = patterns,
         };
     }
 };

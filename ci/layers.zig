@@ -10,7 +10,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/look.zig", "src/nfa/compile.zig" } },
     .{ .name = "prefilters", .patterns = &.{ "src/prefilter/rank.zig", "src/prefilter.zig" } },
     .{ .name = "engines", .patterns = &.{ "src/pikevm.zig", "src/lazy.zig", "src/backtrack.zig", "src/onepass.zig" } },
-    .{ .name = "meta", .patterns = &.{ "src/Regex.zig", "src/strategy.zig" } },
+    .{ .name = "meta", .patterns = &.{ "src/Regex.zig", "src/Set.zig", "src/strategy.zig" } },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
 
@@ -66,6 +66,7 @@ pub const required = [_][]const u8{
     "src/backtrack.zig",
     "src/onepass.zig",
     "src/Regex.zig",
+    "src/Set.zig",
     "src/strategy.zig",
     "src/spectra.zig",
 };

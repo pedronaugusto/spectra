@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Set`: many patterns compiled together into one automaton (a match state per pattern) and searched in one pass:
+  `isMatch`, `matches` (every pattern with a match, each pattern's matches on their own, into a caller-allocated
+  `Set.Patterns`), and `first` (the leftmost-first match over the patterns as one alternation, with its pattern).
+  Pattern indexes are branded, and a match is checked against the set that found it. A refused pattern is named by
+  `Diagnostic.pattern`. On the PikeVM for now; the lazy DFA's all kind is next.
+- `Input.whole`: only a match covering the span counts. `Regex` searches it on the PikeVM (`Cache.Path.whole`).
 - `Regex.SearchError` (`error.HaystackTooLong`): every search (`isMatch`, `find`, `captures`, and `Matches.next` and
   `nextCaptures`) returns it, for lookaround's stored rows to come, which a search past `Limits.oracle` refuses by
   name. No pattern stores rows yet, so no search returns it. `Regex.longestHaystack(search)` says the limit up

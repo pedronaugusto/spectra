@@ -309,6 +309,8 @@ pub const Cache = struct {
         /// `Strategy.reverse_inner`: the inner literals' prefilter, P's reverse lazy DFA from
         /// an occurrence, and the lazy DFA anchored at the start it found.
         reverse_inner,
+        /// `Input.whole`: the PikeVM over the span, a match counted only at its end.
+        whole,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -405,6 +407,10 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     if (c.reverse) |*r| r.visited = 0;
     if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
+    if (input.whole) {
+        c.last = .whole;
+        return .{ .search = input };
+    }
     if (re.strategy == .literal) {
         const p = &re.prefilter.?;
         c.last = .literal;
@@ -551,7 +557,9 @@ fn findSpan(re: *const Regex, c: *Cache, input: Input) ?Span {
 /// bounded backtracker where the span fits its bits and its stack holds, else the PikeVM.
 fn slotted(re: *const Regex, c: *Cache, input: Input, slots: []?usize) ?usize {
     c.last_slots = .pikevm;
-    if (re.backtracker) |b| if (input.span.len() <= b.longest().?) {
+    // The backtracker takes the first match it reaches; a whole search wants the first that ends
+    // at the span's end.
+    if (re.backtracker) |b| if (!input.whole and input.span.len() <= b.longest().?) {
         if (backtrack.search(&re.nfa, &c.back.?, input, slots)) |end| {
             c.last_slots = .backtrack;
             return end;

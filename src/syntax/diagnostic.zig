@@ -7,6 +7,9 @@ pub const Error = error{ OutOfMemory, Invalid, TooLarge };
 pub const Diagnostic = struct {
     span: Ast.Span = .{ .start = 0, .end = 0 },
     reason: Reason = .none,
+    /// In a set, the index of the pattern refused; null for one pattern, or a set refused as a
+    /// whole.
+    pattern: ?u32 = null,
 };
 
 pub const Reason = enum {

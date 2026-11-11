@@ -34,6 +34,13 @@ pub const Input = struct {
     /// Stop at the first match found, which is not then the leftmost-first one's end: whether
     /// any match exists is all it answers.
     earliest: bool = false,
+    /// Only a match that covers the span counts: anchored at its start, ending at its end.
+    whole: bool = false,
+
+    /// Whether a match must start where the span does.
+    pub fn startAnchored(input: Input) bool {
+        return input.anchored or input.whole;
+    }
 
     pub fn of(haystack: []const u8) Input {
         return .{ .haystack = haystack, .span = .{ .start = 0, .end = haystack.len } };
@@ -148,6 +155,8 @@ pub const Cache = struct {
     states: usize,
     /// States entered by the last search, summed over its positions.
     visited: usize = 0,
+    /// The pattern whose match the last search found: 0 but in a set.
+    pattern: u32 = 0,
 
     /// Allocates what `sizes(nfa)` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, nfa: *const Nfa) Allocator.Error!Cache {
@@ -184,7 +193,7 @@ pub fn search(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
     // regex-automata's `skip_splits_fwd`: an anchored search has no later match to take.
     var again = input;
     while (!isBoundary(input.haystack, end)) {
-        if (input.anchored) return null;
+        if (input.startAnchored()) return null;
         again.span.start += 1;
         end = searchOnce(nfa, cache, again, slots) orelse return null;
     }
@@ -201,7 +210,7 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
     if (input.span.start > input.span.end) return null;
     const stride = slots.len;
     const start = nfa.start_anchored;
-    const anchored = input.anchored or nfa.start_anchored == nfa.start_unanchored;
+    const anchored = input.startAnchored() or nfa.start_anchored == nfa.start_unanchored;
     var curr = &cache.curr;
     var next = &cache.next;
     curr.set.len = 0;
@@ -248,8 +257,12 @@ fn nexts(nfa: *const Nfa, cache: *Cache, curr: *Active, next: *Active, input: In
                 }
                 break :blk null;
             },
-            .match => {
+            .match => |pattern| {
+                // Short of the span's end, a whole match is no match, and the threads after
+                // this one go on.
+                if (input.whole and at != input.span.end) continue;
                 @memcpy(slots, curr.row(stride, key));
+                cache.pattern = pattern;
                 return true;
             },
             else => null,
@@ -258,6 +271,67 @@ fn nexts(nfa: *const Nfa, cache: *Cache, curr: *Active, next: *Active, input: In
         if (target) |t| closure(nfa, cache, next, curr.row(stride, key), input.haystack, at + 1, t, true);
     }
     return false;
+}
+
+/// Every pattern with a match in `input`, each pattern's matches on their own (the all kind:
+/// no thread is dropped at a match), as bits of `out` set: how many patterns were new. The scan
+/// goes to the span's end, or until every pattern has matched. Each thread is entered at most
+/// once per position, as in `search`. In UTF-8, where a match may be empty, one that ends
+/// inside a code point's encoding is not counted, as `search` passes it over.
+pub fn searchAll(nfa: *const Nfa, cache: *Cache, input: Input, out: *std.DynamicBitSetUnmanaged) usize {
+    aegis.assert.invariant(cache.states == nfa.states.len, "a cache searches the automaton it was made for");
+    aegis.assert.invariant(out.bit_length == nfa.patterns, "a pattern set holds a bit per pattern");
+    aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
+    cache.visited = 0;
+    const anchored = input.startAnchored() or nfa.start_anchored == nfa.start_unanchored;
+    var curr = &cache.curr;
+    var next = &cache.next;
+    curr.set.len = 0;
+    next.set.len = 0;
+    var found: usize = 0;
+    var have = out.count();
+    var at = input.span.start;
+    while (at <= input.span.end and have < nfa.patterns) : (at += 1) {
+        if (curr.set.len == 0 and anchored and at > input.span.start) break;
+        if (!anchored or at == input.span.start) closure(nfa, cache, curr, next.absent(0), input.haystack, at, nfa.start_anchored, true);
+        for (curr.set.items()) |key| {
+            cache.visited += 1;
+            const id = stateOf(nfa, key);
+            const target: ?Nfa.StateId = switch (nfa.state(id)) {
+                .byte_range => |t| if (at < input.span.end and t.contains(input.haystack[at])) t.next else null,
+                .sparse => |slice| blk: {
+                    if (at >= input.span.end) break :blk null;
+                    const byte = input.haystack[at];
+                    for (nfa.transitionsOf(slice)) |t| {
+                        if (byte < t.lo) break :blk null;
+                        if (byte <= t.hi) break :blk t.next;
+                    }
+                    break :blk null;
+                },
+                .match => |pattern| blk: {
+                    if (input.whole and at != input.span.end) break :blk null;
+                    // regex-automata's rule, as `search` keeps it: where a match may be empty,
+                    // one ending inside a code point's encoding is not counted.
+                    if (nfa.utf8 and nfa.empty_ok and !isBoundary(input.haystack, at)) break :blk null;
+                    if (!out.isSet(pattern)) {
+                        out.set(pattern);
+                        found += 1;
+                        have += 1;
+                    }
+                    break :blk null;
+                },
+                else => null,
+            };
+            if (target) |t| closure(nfa, cache, next, next.absent(0), input.haystack, at + 1, t, true);
+        }
+        std.mem.swap(*Active, &curr, &next);
+        next.set.len = 0;
+    }
+    if (std.debug.runtime_safety) {
+        const positions = input.span.end - input.span.start + 1;
+        aegis.assert.invariant(cache.visited <= 2 * nfa.states.len * lanes(nfa) * positions, "a search enters each thread at most once per position and step");
+    }
+    return found;
 }
 
 /// Adds to `into` every thread reachable from `from` by epsilon at `at`, in preference order,

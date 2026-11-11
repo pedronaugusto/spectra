@@ -42,6 +42,8 @@ end_anchored: bool,
 /// Some state is a `loop_begin` or `loop_end`: each thread carries whether it read a byte since
 /// its innermost `loop_begin`, and is told apart by it.
 loop_checks: bool,
+/// The patterns whose matches it tells apart: 1 but for a set's automaton.
+patterns: u32 = 1,
 
 pub const Transition = struct {
     lo: u8,
@@ -81,7 +83,9 @@ pub const State = union(enum) {
     loop_end: StateId,
     /// Matches nothing: an empty class.
     fail,
-    match,
+    /// A match of pattern `match`: always 0 but in a set's automaton, which holds one match
+    /// state per pattern.
+    match: u32,
 };
 
 pub fn state(nfa: *const Nfa, id: StateId) State {
