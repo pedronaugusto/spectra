@@ -8,6 +8,12 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Automaton`, the stepping automaton over a pattern's or a set's forward lazy DFA of the all kind (`Regex.automaton`,
+  `Set.automaton`): `start`, `step`, `stepEnd` (whether the bytes so far match, a match being seen one byte late),
+  `isMatch`, `isDead` and `patterns`, in a `Cache` of the walker's. `error.Stale` refuses a state built before the
+  store's last clear and `error.GaveUp` follows the give-up rule; the doc gives the walker's recipe for each (re-walk
+  from `start` within ten times the bytes stepped, else the whole-string searches). Null where the DFA has quit
+  bytes (a Unicode word boundary).
 - `Set`: many patterns compiled together into one automaton (a match state per pattern) and searched in one pass:
   `isMatch`, `matches` (every pattern with a match, each pattern's matches on their own, into a caller-allocated
   `Set.Patterns`), and `first` (the leftmost-first match over the patterns as one alternation, with its pattern).

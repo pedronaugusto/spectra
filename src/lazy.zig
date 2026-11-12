@@ -590,6 +590,38 @@ pub fn searchAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, out: *
     return found;
 }
 
+// Stepping, one byte at a time, for the stepping automaton: the transitions the searches take.
+
+/// The state at a haystack's start, `before` the byte before it (null at a text's start).
+pub fn stepStart(nfa: *const Nfa, d: *const Dfa, c: *Cache, before: ?u8, anchored: bool) Error!u32 {
+    aegis.assert.invariant(d.direction == .forward and d.quit == null, "a stepped lazy DFA reads forward and never quits");
+    const context: Context = if (before) |b| d.kinds[b] else d.start;
+    return startOf(nfa, d, c, context, anchored or nfa.start_anchored == nfa.start_unanchored);
+}
+
+/// The state after `s` reads `byte`, built where new: a byte read toward the give-up rule.
+pub fn stepByte(nfa: *const Nfa, d: *const Dfa, c: *Cache, s: u32, byte: u8) Error!u32 {
+    c.bytes_since += 1;
+    const t = c.rows[@as(usize, s) * d.stride + d.classes[byte]];
+    return if (t != unknown) t else next(nfa, d, c, s, byte);
+}
+
+/// The state after `s` at the haystack's end, whose match is a match ending there.
+pub fn stepEnd(nfa: *const Nfa, d: *const Dfa, c: *Cache, s: u32) Error!u32 {
+    const t = c.rows[@as(usize, s) * d.stride + d.stride - 1];
+    return if (t != unknown) t else next(nfa, d, c, s, null);
+}
+
+/// Whether a match ended where the byte that led to `s` began, or at the end after `stepEnd`.
+pub fn matchOf(c: *const Cache, s: u32) bool {
+    return c.recs[s].match;
+}
+
+/// Whether `s` has no seeds: no byte leads from it to a match beyond those it holds.
+pub fn deadOf(c: *const Cache, s: u32) bool {
+    return s == dead or c.recs[s].len == 0;
+}
+
 fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored: bool) Error!u32 {
     const at = input.span.start;
     const context: Context = if (at == 0) d.start else blk: {

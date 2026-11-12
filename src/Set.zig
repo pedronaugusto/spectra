@@ -30,6 +30,7 @@ const Nfa = @import("nfa/Nfa.zig");
 const compile_mod = @import("nfa/compile.zig");
 const pikevm = @import("pikevm.zig");
 const lazy = @import("lazy.zig");
+const Automaton = @import("Automaton.zig");
 
 pub const Span = Regex.Span;
 pub const Input = Regex.Input;
@@ -114,6 +115,13 @@ fn cacheBytesOf(nfa: *const Nfa, all: ?lazy.Dfa, leftmost: ?lazy.Dfa) ?usize {
 /// The engines the set has: the PikeVM always, and each lazy DFA unless its store cannot hold the
 /// fewest states a search needs.
 pub const Engines = struct { pikevm: bool = true, all: bool, leftmost: bool };
+
+/// The stepping automaton over the set (Automaton.zig): `patterns` says which matched. Null where
+/// the set has no lazy DFA of the all kind, or one with quit bytes. `set` stays where it is while
+/// the automaton is used.
+pub fn automaton(set: *const Set) ?Automaton {
+    return Automaton.of(&set.nfa, if (set.all) |*d| d else return null);
+}
 
 pub fn engines(set: *const Set) Engines {
     return .{ .all = set.all != null, .leftmost = set.leftmost != null };

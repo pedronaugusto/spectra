@@ -33,6 +33,7 @@ const prefilter_mod = @import("prefilter.zig");
 const literals_mod = @import("hir/literals.zig");
 const suffix_mod = @import("hir/suffix.zig");
 const inner_mod = @import("hir/inner.zig");
+const Automaton = @import("Automaton.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -61,6 +62,9 @@ suffix: ?Suffix,
 /// The literals X's matches start with, where `Strategy.reverse_inner` leads: their prefilter,
 /// and P's reverse automaton and lazy DFA.
 inner: ?Inner,
+/// The forward lazy DFA of the all kind, for the stepping automaton: worked out at compile, its
+/// states in an `Automaton.Cache` of the walker's; null where `Limits.lazy_dfa` is too small.
+stepper: ?lazy.Dfa,
 
 const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
 
@@ -133,7 +137,8 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner };
+    const stepper = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .all);
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner, .stepper = stepper };
 }
 
 /// The split of `hir`'s top concatenation P·X at the first child after the first whose
@@ -260,6 +265,12 @@ pub const Engines = struct {
     onepass: bool,
     prefilter: bool,
 };
+
+/// The stepping automaton over the pattern (Automaton.zig); null where it has no lazy DFA, or one
+/// with quit bytes (a Unicode word boundary). `re` stays where it is while the automaton is used.
+pub fn automaton(re: *const Regex) ?Automaton {
+    return Automaton.of(&re.nfa, if (re.stepper) |*d| d else return null);
+}
 
 pub fn engines(re: *const Regex) Engines {
     return .{ .lazy_dfa = re.dfa != null, .reverse_dfa = re.reverse != null, .backtrack = re.backtracker != null, .onepass = re.onepass != null, .prefilter = re.prefilter != null };

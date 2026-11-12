@@ -4,6 +4,7 @@ pub const Limits = @import("Limits.zig");
 /// A compiled pattern and its searches.
 pub const Regex = @import("Regex.zig");
 pub const Set = @import("Set.zig");
+pub const Automaton = @import("Automaton.zig");
 pub const syntax = struct {
     pub const Ast = @import("syntax/Ast.zig");
     pub const parse = @import("syntax/parse.zig").parse;
