@@ -54,6 +54,7 @@ const look_zig = @import("nfa/look.zig");
 const pikevm = @import("pikevm.zig");
 const SparseSet = @import("SparseSet.zig");
 const Prefilter = @import("prefilter.zig").Prefilter;
+const oracle = @import("oracle.zig");
 const Key = SparseSet.Key;
 
 pub const Input = pikevm.Input;
@@ -102,9 +103,48 @@ const words: LookSet = .initMany(&.{ .word_ascii, .not_word_ascii, .word_unicode
 const lines: LookSet = .initMany(&.{ .start_line_lf, .end_line_lf, .start_line_crlf, .end_line_crlf, .start_line_ecma, .end_line_ecma });
 const returns: LookSet = .initMany(&.{ .start_line_crlf, .end_line_crlf, .start_line_ecma, .end_line_ecma });
 
+/// What a lazy DFA of an automaton with lookaround (oracle.zig) needs: the main expression's
+/// states first, then a lane per lookaround streamed beside it, whose accepts are its truth; and
+/// the stored rows its checks read, as the column a transition is keyed by besides the byte.
+/// Its slices are the caller's, kept as long as the DFA.
+pub const LookInfo = struct {
+    /// States below this are the main expression's; the rest are the lanes'.
+    main_states: u32,
+    /// The seeds of a start: each lane's (its `.*?` before its body), deepest first.
+    lane_starts: []const Nfa.StateId,
+    /// Each lookaround's lane match state where streamed, by its number; null where stored.
+    lane_match: []const ?Nfa.StateId,
+    /// Each stored lookaround's bit in the column, by its number; null where streamed or read by
+    /// no check.
+    column_bit: []const ?u3,
+    /// The stored lookarounds in column order: at most four.
+    column_rows: []const u32,
+};
+
+/// The stored rows a lazy DFA's search reads its columns from.
+pub const Columns = struct {
+    plan: *const oracle.Plan,
+    cache: *const oracle.Cache,
+
+    fn at(c: Columns, info: *const LookInfo, pos: usize) u32 {
+        var col: u32 = 0;
+        for (info.column_rows, 0..) |row, bit| {
+            if (c.cache.holds(c.plan.rows[row].slot.?, pos)) col |= @as(u32, 1) << @intCast(bit);
+        }
+        return col;
+    }
+};
+
 /// What an automaton's lazy DFA is, worked out once at compile: its alphabet, what each byte is
 /// to the assertions, and how its cache divides. Immutable; every state lives in a `Cache`.
 pub const Dfa = struct {
+    /// Lookaround's lanes and columns (`LookInfo`, whose slices the caller keeps); null for an
+    /// automaton without lookaround.
+    look: ?LookInfo = null,
+    /// The columns a transition is keyed by besides the byte: 1, or 2^k for k stored rows.
+    columns: u32 = 1,
+    /// The units a transition reads: the classes, and the haystack's end.
+    ends: u32 = 0,
     direction: Direction,
     kind: Kind,
     /// The automaton's patterns: 1 but for a set's.
@@ -113,7 +153,7 @@ pub const Dfa = struct {
     restart: Key,
     /// Each byte's class: bytes that no transition and no assertion tells apart.
     classes: [256]u8,
-    /// A row's length: the classes, and the haystack's end.
+    /// A row's length: the units times the columns.
     stride: u32,
     /// The class of every byte past 0x7f, when an assertion needs more than one byte.
     quit: ?u8,
@@ -146,9 +186,18 @@ pub const Dfa = struct {
 /// The lazy DFA of `nfa` with a store of `capacity` bytes, or null when that cannot hold the
 /// fewest states a search needs: the pattern then has no lazy DFA (`Regex.engines`).
 pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction, kind: Kind) ?Dfa {
-    // A lookaround's truth is a position's, not a byte's: not in the first cut (spectra.md §3.1).
-    if (nfa.checks) return null;
-    var d: Dfa = undefined;
+    return buildLook(nfa, capacity, direction, kind, null);
+}
+
+/// `build`, for an automaton with lookaround: its lanes folded into the states and its stored
+/// rows keyed as columns (`look`). Null where the stored rows read are more than four: that
+/// search is the PikeVM's.
+pub fn buildLook(nfa: *const Nfa, capacity: usize, direction: Direction, kind: Kind, look: ?LookInfo) ?Dfa {
+    if (nfa.checks and look == null) return null;
+    if (look) |l| if (l.column_rows.len > 4) return null;
+    var d: Dfa = .{ .direction = undefined, .kind = undefined, .patterns = undefined, .restart = undefined, .classes = undefined, .stride = undefined, .quit = undefined, .kinds = undefined, .start = undefined, .states = undefined, .keys = undefined, .slots = undefined, .threads = undefined, .stack = undefined };
+    d.look = look;
+    d.columns = if (look) |l| @as(u32, 1) << @intCast(l.column_rows.len) else 1;
     d.direction = direction;
     d.kind = kind;
     d.patterns = nfa.patterns;
@@ -173,7 +222,8 @@ pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction, kind: Kind)
         d.classes[b] = @intCast(class);
         d.kinds[b] = if (lf and b == '\n') .lf else if (cr and b == '\r') .cr else if (word and look_zig.isWordByte(@intCast(b))) .word else .other;
     }
-    d.stride = class + 2;
+    d.ends = class + 2;
+    d.stride = d.ends * d.columns;
     d.quit = if (quit) d.classes[0x80] else null;
     // The start is a line's start and no word byte: a line feed, unless `\A` tells them apart.
     // Reversed, the end stays itself: CRLF's `$` holds at the end always, but before a line feed
@@ -245,6 +295,9 @@ fn aheadOf(kind: Context) Ahead {
 const Rec = struct {
     start: u32,
     len: u32,
+    /// Some seed is the main expression's: with lookaround's lanes, a state of lanes alone
+    /// leads to no match.
+    alive: bool = false,
     matched: u32 = 0,
     hash: u32,
     context: Context,
@@ -371,7 +424,15 @@ pub const Cache = struct {
         const id = c.len;
         c.len += 1;
         @memcpy(c.keys[c.keys_len..][0..keys.len], keys);
-        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(seeds), .matched = @intCast(keys.len - seeds), .hash = h, .context = context, .match = match, .restart = seeds == 1 and keys.len == 1 and keys[0] == d.restart };
+        var alive = seeds > 0;
+        if (d.look) |l| {
+            alive = false;
+            // Seeds are state ids.
+            for (keys[0..seeds]) |k| if (k < l.main_states) {
+                alive = true;
+            };
+        }
+        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(seeds), .alive = alive, .matched = @intCast(keys.len - seeds), .hash = h, .context = context, .match = match, .restart = seeds == 1 and keys.len == 1 and keys[0] == d.restart };
         c.keys_len += @intCast(keys.len);
         @memset(c.rows[@as(usize, id) * d.stride ..][0..d.stride], unknown);
         const mask = d.slots - 1;
@@ -409,13 +470,14 @@ fn hashOf(context: Context, match: bool, keys: []const Key, seeds: usize) u32 {
 /// in UTF-8, an empty match that would split a code point is passed over, as the PikeVM does.
 pub fn search(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input) Error!?usize {
     var from: usize = undefined;
-    return searchFrom(nfa, d, c, input, &from, null);
+    return searchFrom(nfa, d, c, input, &from, null, null);
 }
 
 /// `search`, and in `from` where the search that found it began: the span's start, or past it
 /// where an empty match split a code point. The match is the leftmost-first from there. With
 /// `pre`, the pattern's prefilter skips to where a match may start.
-pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from: *usize, pre: ?*const Prefilter) Error!?usize {
+/// With lookaround (`d.look`), `cols` gives the stored rows its columns are read from.
+pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from: *usize, pre: ?*const Prefilter, cols: ?Columns) Error!?usize {
     aegis.assert.invariant(d.direction == .forward, "a forward search reads a forward lazy DFA");
     aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
     aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
@@ -423,14 +485,14 @@ pub fn searchFrom(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, from:
     c.candidates = 0;
     c.skipped = 0;
     from.* = input.span.start;
-    var end = try searchOnce(nfa, d, c, input, pre) orelse return null;
+    var end = try searchOnce(nfa, d, c, input, pre, cols) orelse return null;
     if (!(nfa.utf8 and nfa.empty_ok)) return end;
     var again = input;
     while (!pikevm.isBoundary(input.haystack, end)) {
         if (input.anchored) return null;
         again.span.start += 1;
         from.* = again.span.start;
-        end = try searchOnce(nfa, d, c, again, pre) orelse return null;
+        end = try searchOnce(nfa, d, c, again, pre, cols) orelse return null;
     }
     return end;
 }
@@ -474,25 +536,29 @@ pub fn searchReverseLimited(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: In
         if (d.quit == class) return error.Quit;
         c.visited += 1;
         c.bytes_since += 1;
-        const t = c.rows[@as(usize, s) * d.stride + class];
-        s = if (t != unknown) t else try next(nfa, d, c, s, h[at - 1]);
+        const t = c.rows[index(d, s, class, 0)];
+        s = if (t != unknown) t else try next(nfa, d, c, s, h[at - 1], 0);
         if (c.recs[s].match) found = at;
     }
     if (s == dead) return found;
     // The byte before the span, or the haystack's start, decides a match that starts at its start.
     const before: ?u8 = if (input.span.start > 0) h[input.span.start - 1] else null;
-    const class: u32 = if (before) |b| d.classes[b] else d.stride - 1;
+    const class: u32 = if (before) |b| d.classes[b] else d.ends - 1;
     if (before) |b| if (d.quit == d.classes[b]) return error.Quit;
-    const t = c.rows[@as(usize, s) * d.stride + class];
-    s = if (t != unknown) t else try next(nfa, d, c, s, before);
+    const t = c.rows[index(d, s, class, 0)];
+    s = if (t != unknown) t else try next(nfa, d, c, s, before, 0);
     if (c.recs[s].match) found = input.span.start;
     return found;
 }
 
-fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*const Prefilter) Error!?usize {
+fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*const Prefilter, cols: ?Columns) Error!?usize {
     if (input.span.start > input.span.end) return null;
     const anchored = input.anchored or nfa.start_anchored == nfa.start_unanchored;
-    var s = try startState(nfa, d, c, input, anchored);
+    const lanes = if (d.look) |l| l.lane_starts.len > 0 else false;
+    var s = if (lanes and input.span.start > 0)
+        try lanesTo(nfa, d, c, input.haystack, input.span.start, anchored, cols)
+    else
+        try startState(nfa, d, c, input, anchored);
     var found: ?usize = null;
     var at = input.span.start;
     // Anchored, the start is where the match is: nothing to skip to.
@@ -501,7 +567,8 @@ fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*co
     var skipped: usize = 0;
     defer c.stopped = at;
     while (at < input.span.end) : (at += 1) {
-        if (s == dead) return found;
+        // With lookaround's lanes, a state of lanes alone leads to no match.
+        if (s == dead or (d.look != null and !c.recs[s].alive)) return found;
         if (prefilter) |p| if (found == null and c.recs[s].restart) {
             const next_at = p.find(input.haystack, at, input.span.end) orelse return null;
             tries += 1;
@@ -521,20 +588,23 @@ fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*co
         if (d.quit == class) return error.Quit;
         c.visited += 1;
         c.bytes_since += 1;
-        const t = c.rows[@as(usize, s) * d.stride + class];
-        s = if (t != unknown) t else try next(nfa, d, c, s, byte);
+        // The checks closed at this position read its column.
+        const col = columnAt(d, cols, at);
+        const t = c.rows[index(d, s, class, col)];
+        s = if (t != unknown) t else try next(nfa, d, c, s, byte, col);
         if (c.recs[s].match) {
             found = at;
             if (input.earliest) return at;
         }
     }
-    if (s == dead) return found;
+    if (s == dead or (d.look != null and !c.recs[s].alive)) return found;
+    const end_col = columnAt(d, cols, input.span.end);
     // The byte after the span, or the haystack's end, decides a match that ends at its end.
     const after: ?u8 = if (input.span.end < input.haystack.len) input.haystack[input.span.end] else null;
-    const class: u32 = if (after) |b| d.classes[b] else d.stride - 1;
+    const class: u32 = if (after) |b| d.classes[b] else d.ends - 1;
     if (after) |b| if (d.quit == d.classes[b]) return error.Quit;
-    const t = c.rows[@as(usize, s) * d.stride + class];
-    s = if (t != unknown) t else try next(nfa, d, c, s, after);
+    const t = c.rows[index(d, s, class, end_col)];
+    s = if (t != unknown) t else try next(nfa, d, c, s, after, end_col);
     if (c.recs[s].match) found = input.span.end;
     return found;
 }
@@ -564,8 +634,8 @@ pub fn searchAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, out: *
         if (d.quit == class) return error.Quit;
         c.visited += 1;
         c.bytes_since += 1;
-        const t = c.rows[@as(usize, s) * d.stride + class];
-        s = if (t != unknown) t else try next(nfa, d, c, s, byte);
+        const t = c.rows[index(d, s, class, 0)];
+        s = if (t != unknown) t else try next(nfa, d, c, s, byte, 0);
         // A match flagged here ended at `at`, before the byte just read.
         if (c.recs[s].match and !input.whole and !(splits and !pikevm.isBoundary(input.haystack, at))) {
             for (c.patternsOf(s)) |p| if (!out.isSet(p)) {
@@ -579,10 +649,10 @@ pub fn searchAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, out: *
     if (s == dead or have == d.patterns) return found;
     // The byte after the span, or the haystack's end, decides a match that ends at its end.
     const after: ?u8 = if (input.span.end < input.haystack.len) input.haystack[input.span.end] else null;
-    const class: u32 = if (after) |b| d.classes[b] else d.stride - 1;
+    const class: u32 = if (after) |b| d.classes[b] else d.ends - 1;
     if (after) |b| if (d.quit == d.classes[b]) return error.Quit;
-    const t = c.rows[@as(usize, s) * d.stride + class];
-    s = if (t != unknown) t else try next(nfa, d, c, s, after);
+    const t = c.rows[index(d, s, class, 0)];
+    s = if (t != unknown) t else try next(nfa, d, c, s, after, 0);
     if (c.recs[s].match and !(splits and !pikevm.isBoundary(input.haystack, input.span.end))) {
         for (c.patternsOf(s)) |p| if (!out.isSet(p)) {
             out.set(p);
@@ -604,14 +674,14 @@ pub fn stepStart(nfa: *const Nfa, d: *const Dfa, c: *Cache, before: ?u8, anchore
 /// The state after `s` reads `byte`, built where new: a byte read toward the give-up rule.
 pub fn stepByte(nfa: *const Nfa, d: *const Dfa, c: *Cache, s: u32, byte: u8) Error!u32 {
     c.bytes_since += 1;
-    const t = c.rows[@as(usize, s) * d.stride + d.classes[byte]];
-    return if (t != unknown) t else next(nfa, d, c, s, byte);
+    const t = c.rows[index(d, s, d.classes[byte], 0)];
+    return if (t != unknown) t else next(nfa, d, c, s, byte, 0);
 }
 
 /// The state after `s` at the haystack's end, whose match is a match ending there.
 pub fn stepEnd(nfa: *const Nfa, d: *const Dfa, c: *Cache, s: u32) Error!u32 {
-    const t = c.rows[@as(usize, s) * d.stride + d.stride - 1];
-    return if (t != unknown) t else next(nfa, d, c, s, null);
+    const t = c.rows[index(d, s, d.ends - 1, 0)];
+    return if (t != unknown) t else next(nfa, d, c, s, null, 0);
 }
 
 /// Whether a match ended where the byte that led to `s` began, or at the end after `stepEnd`.
@@ -635,12 +705,62 @@ fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored:
 }
 
 fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored: bool) Error!u32 {
-    const index = @as(usize, @intFromEnum(context)) * 2 + @intFromBool(anchored);
-    if (c.starts[index] != unknown) return c.starts[index];
+    const which = @as(usize, @intFromEnum(context)) * 2 + @intFromBool(anchored);
+    if (c.starts[which] != unknown) return c.starts[which];
     const seed: Key = (if (anchored) nfa.start_anchored else nfa.start_unanchored).raw();
-    const id = try c.intern(d, null, context, false, &.{seed}, 1);
-    c.starts[index] = id;
+    const id = if (d.look) |l| blk: {
+        // The lanes first, so each closure settles their accepts before a check reads them.
+        const keys = c.joined[0 .. l.lane_starts.len + 1];
+        for (keys[0..l.lane_starts.len], l.lane_starts) |*k, ls| k.* = ls.raw();
+        keys[l.lane_starts.len] = seed;
+        break :blk try c.intern(d, null, context, false, keys, keys.len);
+    } else try c.intern(d, null, context, false, &.{seed}, 1);
+    c.starts[which] = id;
     return id;
+}
+
+/// With lookaround's lanes, the state of the lanes alone at a haystack's start: what a search
+/// starting past it steps from position 0 to its start (`lanesTo`).
+fn lanesStart(d: *const Dfa, c: *Cache) Error!u32 {
+    const l = d.look.?;
+    const keys = c.joined[0..l.lane_starts.len];
+    for (keys, l.lane_starts) |*k, ls| k.* = ls.raw();
+    return c.intern(d, null, d.start, false, keys, keys.len);
+}
+
+/// With lookaround's lanes, a search starting at `at` past the haystack's start: the lanes run
+/// alone from position 0 (a lookbehind's truth is what lies before), then the main expression's
+/// start seed joins their state. The same transitions, so the same bound.
+fn lanesTo(nfa: *const Nfa, d: *const Dfa, c: *Cache, haystack: []const u8, at: usize, anchored: bool, cols: ?Columns) Error!u32 {
+    var s = try lanesStart(d, c);
+    var pos: usize = 0;
+    while (pos < at) : (pos += 1) {
+        const byte = haystack[pos];
+        const class = d.classes[byte];
+        if (d.quit == class) return error.Quit;
+        c.visited += 1;
+        c.bytes_since += 1;
+        const col = columnAt(d, cols, pos);
+        const t = c.rows[index(d, s, class, col)];
+        s = if (t != unknown) t else try next(nfa, d, c, s, byte, col);
+    }
+    const rec = c.recs[s];
+    const seed: Key = (if (anchored) nfa.start_anchored else nfa.start_unanchored).raw();
+    const keys = c.joined[0 .. rec.len + 1];
+    @memcpy(keys[0..rec.len], c.keys[rec.start..][0..rec.len]);
+    keys[rec.len] = seed;
+    return c.intern(d, &s, rec.context, false, keys, keys.len);
+}
+
+/// Where in a row the transition on `unit` (a class, or the end) under column `col` lives.
+fn index(d: *const Dfa, s: u32, unit: u32, col: u32) usize {
+    return @as(usize, s) * d.stride + @as(usize, unit) * d.columns + col;
+}
+
+fn columnAt(d: *const Dfa, cols: ?Columns, pos: usize) u32 {
+    const l = if (d.look) |*l| l else return 0;
+    if (l.column_rows.len == 0) return 0;
+    return cols.?.at(l, pos);
 }
 
 /// Builds the transition from `from` on `unit` (null: the haystack's end) and returns where it
@@ -649,12 +769,12 @@ fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored
 /// state, once; the first thread at the match makes the next state a match and drops every
 /// thread after it (leftmost-first). Reversed, `unit` is the byte before and the state's context
 /// the byte after, and a match drops nothing.
-fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Error!u32 {
+fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8, col: u32) Error!u32 {
     var from = from_id;
     const rec = c.recs[from];
     const decide: Decide = switch (d.direction) {
-        .forward => .{ .before = rec.context, .ahead = if (unit) |b| aheadOf(d.kinds[b]) else .end },
-        .reverse => .{ .before = if (unit) |b| d.kinds[b] else .start, .ahead = aheadOf(rec.context) },
+        .forward => .{ .before = rec.context, .ahead = if (unit) |b| aheadOf(d.kinds[b]) else .end, .look = if (d.look) |*l| l else null, .col = col },
+        .reverse => .{ .before = if (unit) |b| d.kinds[b] else .start, .ahead = aheadOf(rec.context), .look = if (d.look) |*l| l else null, .col = col },
     };
     c.a.len = 0;
     // A seed has just read a byte, or is the start: its bit is set.
@@ -665,6 +785,8 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
     for (c.a.items()) |key| {
         const target: ?Nfa.StateId = switch (nfa.state(pikevm.stateOf(nfa, key))) {
             .match => |pattern| {
+                // A lane's accept is its lookaround's truth, not a match.
+                if (d.look != null and pattern != 0) continue;
                 match = true;
                 if (d.direction == .forward and d.kind == .leftmost_first) break;
                 if (d.kind == .all) {
@@ -684,7 +806,7 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
         // The PikeVM's closure from a target entered before enters nothing.
         if (target) |t| _ = c.b.insert(t.raw());
     }
-    const class: u32 = if (unit) |b| d.classes[b] else d.stride - 1;
+    const class: u32 = if (unit) |b| d.classes[b] else d.ends - 1;
     const seeds = c.b.items();
     var keys = seeds;
     if (matched > 0) {
@@ -695,7 +817,7 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
         keys = c.joined[0 .. seeds.len + matched];
     }
     const to = if (seeds.len == 0 and !match) dead else try c.intern(d, &from, if (unit) |b| d.kinds[b] else .other, match, keys, seeds.len);
-    c.rows[@as(usize, from) * d.stride + class] = to;
+    c.rows[index(d, from, class, col)] = to;
     return to;
 }
 
@@ -707,7 +829,7 @@ fn stepSparse(nfa: *const Nfa, slice: Nfa.Slice, byte: u8) ?Nfa.StateId {
     return null;
 }
 
-const Decide = struct { before: Context, ahead: Ahead };
+const Decide = struct { before: Context, ahead: Ahead, look: ?*const LookInfo = null, col: u32 = 0 };
 
 /// Adds to `c.a` every thread reachable from `from` by epsilon, in preference order, each look
 /// decided and followed where it holds: the PikeVM's closure, without slots.
@@ -752,7 +874,17 @@ fn closure(nfa: *const Nfa, c: *Cache, from: Nfa.StateId, decide: Decide) void {
                     if (!read) break;
                     id = next_id;
                 },
-                .check => aegis.assert.never("a lazy DFA is built for no automaton with lookaround"),
+                .check => |k| {
+                    const l = decide.look orelse aegis.assert.never("a lazy DFA of an automaton with lookaround knows its lanes and columns");
+                    // A streamed lookaround's lane is closed already (lanes come first); a stored
+                    // one's bit is in the column.
+                    const truth = if (l.lane_match[k.row]) |m|
+                        c.a.contains(pikevm.keyOf(nfa, m, true))
+                    else
+                        (decide.col >> l.column_bit[k.row].?) & 1 != 0;
+                    if (truth == k.negated) break;
+                    id = k.next;
+                },
             }
         }
     }
@@ -762,4 +894,151 @@ fn push(c: *Cache, depth: *usize, e: Explore) void {
     aegis.assert.invariant(depth.* < c.stack.len, "a closure pushes at most once per state and alternative");
     c.stack[depth.*] = e;
     depth.* += 1;
+}
+
+/// An automaton with lookaround as its lazy DFA reads it: the main expression's states, then a
+/// lane per lookaround the plan streams in the main expression (each `.*?` and its body, its
+/// match `1 + number`), and what `LookInfo` says of them. Owned; `deinit` frees it.
+pub const Combined = struct {
+    nfa: Nfa,
+    lane_starts: []Nfa.StateId,
+    lane_match: []?Nfa.StateId,
+    column_bit: []?u3,
+    column_rows: []u32,
+    /// More stored rows are read than a column holds: no lazy DFA, the PikeVM's.
+    too_many_columns: bool,
+    /// The main expression's states, the first of the automaton's.
+    main_states: u32,
+
+    pub fn info(c: *const Combined) LookInfo {
+        return .{ .main_states = c.main_states, .lane_starts = c.lane_starts, .lane_match = c.lane_match, .column_bit = c.column_bit, .column_rows = c.column_rows };
+    }
+
+    pub fn deinit(c: *Combined, gpa: Allocator) void {
+        c.nfa.deinit(gpa);
+        gpa.free(c.lane_starts);
+        gpa.free(c.lane_match);
+        gpa.free(c.column_bit);
+        gpa.free(c.column_rows);
+        c.* = undefined;
+    }
+};
+
+/// `main` with the lanes of every lookaround `p` streams in it, each read forward.
+pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan) Allocator.Error!Combined {
+    var states: std.ArrayList(Nfa.State) = .empty;
+    defer states.deinit(gpa);
+    var transitions: std.ArrayList(Nfa.Transition) = .empty;
+    defer transitions.deinit(gpa);
+    var alternatives: std.ArrayList(Nfa.StateId) = .empty;
+    defer alternatives.deinit(gpa);
+    const lane_match = try gpa.alloc(?Nfa.StateId, p.rows.len);
+    errdefer gpa.free(lane_match);
+    @memset(lane_match, null);
+    var starts: std.ArrayList(Nfa.StateId) = .empty;
+    errdefer starts.deinit(gpa);
+    var looks = main.looks;
+    try append(gpa, &states, &transitions, &alternatives, main, null);
+    // Deepest first: an inner lane's accept settles before an outer one's check reads it.
+    var row = p.rows.len;
+    while (row > 0) {
+        row -= 1;
+        if (p.rows[row].scan != .forward or !p.streamedIn(@intCast(row), null)) continue;
+        const lane = &p.rows[row].nfa;
+        const shift: u32 = @intCast(states.items.len);
+        try append(gpa, &states, &transitions, &alternatives, lane, @intCast(row));
+        try starts.append(gpa, @fromBackingInt(lane.start_unanchored.raw() + shift));
+        for (lane.states, 0..) |st, i| if (st == .match) {
+            lane_match[row] = @fromBackingInt(@as(u32, @intCast(i)) + shift);
+        };
+        looks = looks.unionWith(lane.looks);
+    }
+    // The stored rows any check reads, in the order first met: the column's bits.
+    const column_bit = try gpa.alloc(?u3, p.rows.len);
+    errdefer gpa.free(column_bit);
+    @memset(column_bit, null);
+    var column_rows: std.ArrayList(u32) = .empty;
+    errdefer column_rows.deinit(gpa);
+    var too_many = false;
+    for (states.items) |st| switch (st) {
+        .check => |k| if (p.rows[k.row].slot != null and column_bit[k.row] == null) {
+            if (column_rows.items.len == 4) {
+                too_many = true;
+                continue;
+            }
+            column_bit[k.row] = @intCast(column_rows.items.len);
+            try column_rows.append(gpa, k.row);
+        },
+        else => {},
+    };
+    const names = try gpa.dupe(?[]const u8, main.names);
+    errdefer gpa.free(names);
+    const name_bytes = try gpa.dupe(u8, main.name_bytes);
+    errdefer gpa.free(name_bytes);
+    // The names point into the copy of their bytes.
+    for (names) |*n| if (n.*) |name| {
+        const at = @intFromPtr(name.ptr) - @intFromPtr(main.name_bytes.ptr);
+        n.* = name_bytes[at..][0..name.len];
+    };
+    const out_states = try states.toOwnedSlice(gpa);
+    errdefer gpa.free(out_states);
+    const out_trans = try transitions.toOwnedSlice(gpa);
+    errdefer gpa.free(out_trans);
+    const out_alts = try alternatives.toOwnedSlice(gpa);
+    errdefer gpa.free(out_alts);
+    const lane_starts = try starts.toOwnedSlice(gpa);
+    errdefer gpa.free(lane_starts);
+    return .{
+        .nfa = .{
+            .states = out_states,
+            .transitions = out_trans,
+            .alternatives = out_alts,
+            .start_anchored = main.start_anchored,
+            .start_unanchored = main.start_unanchored,
+            .groups = main.groups,
+            .names = names,
+            .name_bytes = name_bytes,
+            .looks = looks,
+            .utf8 = main.utf8,
+            .empty_ok = main.empty_ok,
+            .end_anchored = main.end_anchored,
+            .loop_checks = main.loop_checks,
+            .checks = true,
+        },
+        .lane_starts = lane_starts,
+        .lane_match = lane_match,
+        .column_bit = column_bit,
+        .column_rows = try column_rows.toOwnedSlice(gpa),
+        .too_many_columns = too_many,
+        .main_states = @intCast(main.states.len),
+    };
+}
+
+/// Appends `nfa`'s states, each id moved past those already there; with `lane`, its match
+/// becomes that lookaround's accept (`1 + lane`).
+fn append(gpa: Allocator, states: *std.ArrayList(Nfa.State), transitions: *std.ArrayList(Nfa.Transition), alternatives: *std.ArrayList(Nfa.StateId), nfa: *const Nfa, lane: ?u32) Allocator.Error!void {
+    const shift: u32 = @intCast(states.items.len);
+    const t_shift: u32 = @intCast(transitions.items.len);
+    const a_shift: u32 = @intCast(alternatives.items.len);
+    const m = struct {
+        fn id(x: Nfa.StateId, by: u32) Nfa.StateId {
+            return @fromBackingInt(x.raw() + by);
+        }
+    };
+    for (nfa.transitions) |t| try transitions.append(gpa, .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next, shift) });
+    for (nfa.alternatives) |x| try alternatives.append(gpa, m.id(x, shift));
+    for (nfa.states) |st| try states.append(gpa, switch (st) {
+        .byte_range => |t| .{ .byte_range = .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next, shift) } },
+        .sparse => |slice| .{ .sparse = .{ .start = slice.start + t_shift, .len = slice.len } },
+        .look => |l| .{ .look = .{ .look = l.look, .next = m.id(l.next, shift) } },
+        .binary => |b| .{ .binary = .{ .first = m.id(b.first, shift), .second = m.id(b.second, shift) } },
+        .alternation => |slice| .{ .alternation = .{ .start = slice.start + a_shift, .len = slice.len } },
+        .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = m.id(cap.next, shift) } },
+        .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = m.id(cl.next, shift) } },
+        .loop_begin => |n| .{ .loop_begin = m.id(n, shift) },
+        .loop_end => |n| .{ .loop_end = m.id(n, shift) },
+        .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .slot = k.slot, .next = m.id(k.next, shift) } },
+        .fail => .fail,
+        .match => |pattern| .{ .match = if (lane) |l| 1 + l else pattern },
+    });
 }

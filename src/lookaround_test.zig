@@ -44,7 +44,7 @@ test "lookahead and lookbehind, positive and negative, nested, through every sea
         var c = try re.cache(gpa);
         defer c.deinit(gpa);
         try testing.expectEqual(case.want, try re.find(&c, .of(case.haystack)));
-        try testing.expectEqual(Regex.Cache.Path.lookaround_pikevm, c.last);
+        try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, c.last);
         try testing.expectEqual(case.want != null, try re.isMatch(&c, case.haystack));
         try testing.expectEqual(Regex.Cache.Path.lookaround_scan, c.last);
     }
@@ -152,9 +152,75 @@ test "a positive lookaround's groups are its first success's, read its way; a ne
     try testing.expectEqual(1, d.pattern.?);
 }
 
+test "the lazy DFA reads up to four stored rows as columns, and past that the PikeVM answers, counted" {
+    // Five lookaheads, each stored for find: past four columns.
+    var five = try Regex.compile(gpa, .init("(?=a)(?=\\w)(?=[a-z])(?!b)(?!c)a"), .{ .syntax = ecma });
+    defer five.deinit();
+    var fc = try five.cache(gpa);
+    defer fc.deinit(gpa);
+    try testing.expectEqual(span(1, 2), try five.find(&fc, .of("ba")));
+    try testing.expectEqual(Regex.Cache.Path.pikevm_columns, fc.last);
+    // Four: the lazy DFA.
+    var four = try Regex.compile(gpa, .init("(?=a)(?=\\w)(?=[a-z])(?!b)a"), .{ .syntax = ecma });
+    defer four.deinit();
+    var gc = try four.cache(gpa);
+    defer gc.deinit(gpa);
+    try testing.expectEqual(span(1, 2), try four.find(&gc, .of("ba")));
+    try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, gc.last);
+}
+
+test "a search starting past the haystack's start runs the streamed lanes alone up to it, on the lazy DFA" {
+    var re = try Regex.compile(gpa, .init("(?<=a.*)b"), .{ .syntax = ecma });
+    defer re.deinit();
+    var c = try re.cache(gpa);
+    defer c.deinit(gpa);
+    // The a lies before the span: the lanes read it.
+    const input: Regex.Input = .{ .haystack = "axxb", .span = .{ .start = 2, .end = 4 } };
+    try testing.expectEqual(span(3, 4), try re.find(&c, input));
+    try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, c.last);
+    const none: Regex.Input = .{ .haystack = "xxxb", .span = .{ .start = 2, .end = 4 } };
+    try testing.expectEqual(null, try re.find(&c, none));
+}
+
+test "where the lazy DFA's store keeps clearing, it gives up and the PikeVM finds the same match" {
+    // `(?:a|b)*a(?:a|b){5}` needs 2^6 states; a small store clears all along.
+    const pattern = "(?<=x)(?:a|b)*a(?:a|b){5}(?=y)";
+    var prng: std.Random.DefaultPrng = .init(0x6a1e);
+    const random = prng.random();
+    var hay: [4000]u8 = undefined;
+    for (&hay) |*b| b.* = "ab"[random.uintLessThan(usize, 2)];
+    hay[0] = 'x';
+    hay[hay.len - 1] = 'y';
+    var small = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .literal("8KiB") } });
+    defer small.deinit();
+    var sc = try small.cache(gpa);
+    defer sc.deinit(gpa);
+    var alone = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
+    defer alone.deinit();
+    var ac = try alone.cache(gpa);
+    defer ac.deinit(gpa);
+    try testing.expectEqual(try alone.find(&ac, .of(&hay)), try small.find(&sc, .of(&hay)));
+    try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa_fell_back, sc.last);
+    try testing.expectEqual(Regex.Cache.Path.lookaround_pikevm, ac.last);
+}
+
 // Every search against ECMA-262's matcher.
 
-var reached: struct { patterns: usize = 0, matched: usize = 0, groups: usize = 0, inside: usize = 0, scans_storing: usize = 0, find_streaming: usize = 0, budget: usize = 0 } = .{};
+var reached: struct {
+    patterns: usize = 0,
+    matched: usize = 0,
+    groups: usize = 0,
+    inside: usize = 0,
+    scans_storing: usize = 0,
+    find_streaming: usize = 0,
+    budget: usize = 0,
+    /// How `find` was answered, and searches started past 0 against the PikeVM alone.
+    lazy_dfa: usize = 0,
+    fell_back: usize = 0,
+    pikevm: usize = 0,
+    columns: usize = 0,
+    spans: usize = 0,
+} = .{};
 
 fn anySearch(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -162,6 +228,8 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     defer state.deinit();
     const a = state.allocator();
     var text: std.ArrayList(u8) = .empty;
+    // One case in four reads five stored rows before the rest: past the lazy DFA's columns.
+    if (shakedown.gen.intRange(s, usize, 0, 3) == 0) try text.appendSlice(a, "(?=.?)(?!c)(?=.*)(?!cc)(?=[^c]*)");
     try grammar.writeLookaround(s, &text, a, 4);
     const ast = try a.create(Ast);
     ast.* = parse_mod.parse(a, .init(text.items), ecma, .{}, null) catch return;
@@ -190,6 +258,27 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     };
     reached.patterns += 1;
     if (re.longestHaystack(.is_match) != null) reached.scans_storing += 1;
+    if (hay.items.len > 1) {
+        var alone = try Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
+        defer alone.deinit();
+        var ac = try alone.cache(case.gpa);
+        defer ac.deinit(case.gpa);
+        try spanAgrees(&re, &c, &alone, &ac, hay.items, shakedown.gen.intRange(s, usize, 1, hay.items.len));
+        // A store of the fewest states over a longer haystack clears and gives up: the PikeVM
+        // takes over, and the match is the same.
+        var small = Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(1600) } }) catch |err| switch (err) {
+            error.TooLarge => return,
+            else => return err,
+        };
+        defer small.deinit();
+        var sc = try small.cache(case.gpa);
+        defer sc.deinit(case.gpa);
+        var long: std.ArrayList(u8) = .empty;
+        for (0..30) |_| try long.appendSlice(a, hay.items);
+        const want_long = try alone.find(&ac, .of(long.items));
+        try testing.expectEqual(want_long, try small.find(&sc, .of(long.items)));
+        if (sc.last == .lookaround_lazy_dfa_fell_back) reached.fell_back += 1;
+    }
     // Find streams the main expression's lookbehinds beside the PikeVM.
     if (re.look.?.stream.stored < re.look.?.search.stored) reached.find_streaming += 1;
     errdefer std.debug.print("/{s}/ on {any}: ECMA-262 {any}\n", .{ text.items, hay.items, want });
@@ -208,6 +297,21 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     }
     if (groups.len > 1) reached.groups += 1;
     try testing.expectEqual(groups[0], try re.find(&c, .of(hay.items)));
+    switch (c.last) {
+        .lookaround_lazy_dfa => reached.lazy_dfa += 1,
+        .lookaround_lazy_dfa_fell_back => reached.fell_back += 1,
+        .lookaround_pikevm => reached.pikevm += 1,
+        .pikevm_columns => reached.columns += 1,
+        else => unreachable,
+    }
+}
+
+/// A search over a span that starts past 0, on the lazy DFA (its lanes run up to the start) and
+/// on the PikeVM alone: the same match.
+fn spanAgrees(re: *const Regex, c: *Regex.Cache, alone: *const Regex, ac: *Regex.Cache, haystack: []const u8, start: usize) !void {
+    const input: Regex.Input = .{ .haystack = haystack, .span = .{ .start = start, .end = haystack.len } };
+    try testing.expectEqual(try alone.find(ac, input), try re.find(c, input));
+    reached.spans += 1;
 }
 
 test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matcher finds, nested both ways" {
@@ -216,4 +320,5 @@ test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matche
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
     try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.inside > 200 and reached.scans_storing > 100 and reached.find_streaming > 300);
+    try testing.expect(reached.lazy_dfa > 500 and reached.spans > 1000 and reached.columns > 300);
 }

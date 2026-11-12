@@ -166,8 +166,14 @@ position each, within `Limits.oracle`; a haystack past it is refused before a by
 the match: the main automaton writes the last position the path took each one at into its first
 group's start slot (cleared with the enclosing quantifier's groups, as ECMA-262 clears them), and one
 anchored run of its body, read its way (a lookbehind's compiled in ECMA-262's backward direction),
-gives its first success's groups; an outer lookaround's run sets its inner ones'. The lazy DFAs, the
-backtracker, the one-pass DFA and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
+gives its first success's groups; an outer lookaround's run sets its inner ones'. Where a match ends
+is the lazy DFA's: its automaton is the main expression with each streamed lookaround's lane after it
+(lanes first in every state's seeds, so a lane's accept settles before a check reads it), and its
+transitions are keyed by the byte's class and the column, the bits of the up to four stored rows its
+checks read; a search starting past the haystack's start runs the lanes alone up to it. Past four
+columns the PikeVM answers (`Cache.Path.pikevm_columns`); where the DFA quits or gives up, the PikeVM
+searches the span. The start and the groups are the PikeVM's over the span cut at the end. The reverse
+lazy DFA, the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
 says whether a pattern is valid whether or not spectra runs it.
 
 ## CPU dispatch

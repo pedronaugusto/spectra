@@ -37,6 +37,12 @@ pub fn insert(s: *SparseSet, key: Key) bool {
     return true;
 }
 
+/// Whether `key` is in the set.
+pub fn contains(s: *const SparseSet, key: Key) bool {
+    const i = s.sparse[key];
+    return i < s.len and s.dense[i] == key;
+}
+
 pub fn items(s: *const SparseSet) []const Key {
     return s.dense[0..s.len];
 }

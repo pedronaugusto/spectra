@@ -91,10 +91,19 @@ const Look = struct {
     /// its groups, read its way (`backward` for a lookbehind): what rebuilds its groups from the
     /// position the main match last took it at. Null for the others.
     bodies: []?Body,
+    /// The main automaton with each plan's streamed lanes, as the lazy DFA reads it, and that DFA:
+    /// where a match ends, for `find`/`captures` (`stream`) and `findAll` (`search`). Null where
+    /// more than four stored rows are read (`Cache.Path.pikevm_columns`) or the store is too small.
+    stream_combined: lazy.Combined,
+    stream_dfa: ?lazy.Dfa,
+    search_combined: lazy.Combined,
+    search_dfa: ?lazy.Dfa,
 
     const Body = struct { nfa: Nfa, scan: oracle.Scan, slot: u32, groups: [2]u32 };
 
     fn deinit(l: *Look, gpa: Allocator) void {
+        l.stream_combined.deinit(gpa);
+        l.search_combined.deinit(gpa);
         l.stream.deinit(gpa);
         l.match.deinit(gpa);
         l.search.deinit(gpa);
@@ -223,7 +232,26 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
     errdefer match.deinit(gpa);
     var match_nfa = try compile_mod.compile(gpa, hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole, .strings = true, .lookaround = true, .reverse = scan == .backward, .reverse_unanchored = scan == .backward }, options.diagnostic);
     errdefer match_nfa.deinit(gpa);
-    const look: Look = .{ .search = search, .stream = stream, .match = match, .match_nfa = match_nfa, .match_scan = scan, .capacity = options.limits.oracle.raw(), .bodies = bodies };
+    var stream_combined = try lazy.combine(gpa, &nfa, &stream);
+    errdefer stream_combined.deinit(gpa);
+    var search_combined = try lazy.combine(gpa, &nfa, &search);
+    errdefer search_combined.deinit(gpa);
+    const lazy_bytes = options.limits.lazy_dfa.raw();
+    const stream_dfa = if (stream_combined.too_many_columns) null else lazy.buildLook(&stream_combined.nfa, lazy_bytes, .forward, .leftmost_first, stream_combined.info());
+    const search_dfa = if (search_combined.too_many_columns) null else lazy.buildLook(&search_combined.nfa, lazy_bytes, .forward, .leftmost_first, search_combined.info());
+    const look: Look = .{
+        .search = search,
+        .stream = stream,
+        .match = match,
+        .match_nfa = match_nfa,
+        .match_scan = scan,
+        .capacity = options.limits.oracle.raw(),
+        .bodies = bodies,
+        .stream_combined = stream_combined,
+        .stream_dfa = stream_dfa,
+        .search_combined = search_combined,
+        .search_dfa = search_dfa,
+    };
     var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look };
     if ((re.cacheBytesChecked() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
@@ -407,6 +435,8 @@ fn cacheBytesChecked(re: *const Regex) ?usize {
     for (l.bodies) |b| if (b) |body| {
         stores = std.math.add(usize, stores, pikevm.sizes(&body.nfa).bytes() orelse return null) catch return null;
     };
+    if (l.stream_dfa) |*d| stores = std.math.add(usize, stores, d.bytes()) catch return null;
+    if (l.search_dfa) |*d| stores = std.math.add(usize, stores, d.bytes()) catch return null;
     return std.math.add(usize, engines_bytes, stores) catch null;
 }
 
@@ -471,6 +501,11 @@ pub const Cache = struct {
     look_match: ?oracle.Cache = null,
     /// A PikeVM's store for each lookaround body whose groups are rebuilt, by number.
     look_bodies: []?pikevm.Cache = &.{},
+    /// The lazy DFAs' stores for a pattern with lookaround: one search's, and every match's.
+    look_stream_lazy: ?lazy.Cache = null,
+    look_search_lazy: ?lazy.Cache = null,
+    /// Which plan the rows were last built for: one search, or every match in turn.
+    look_searches: enum { one, all } = .one,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
     last_start: Start = .pikevm,
@@ -505,6 +540,13 @@ pub const Cache = struct {
         /// A pattern with lookaround, `isMatch`: one scan of the main expression with the
         /// lookarounds it queries streamed beside it.
         lookaround_scan,
+        /// A pattern with lookaround: the lazy DFA, its streams folded into its states and its
+        /// stored rows read as columns, then the PikeVM over the span cut at the match's end.
+        lookaround_lazy_dfa,
+        /// That lazy DFA quit or gave up, and the PikeVM searched the span.
+        lookaround_lazy_dfa_fell_back,
+        /// A pattern with lookaround reading more than four stored rows: the PikeVM alone.
+        pikevm_columns,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -541,6 +583,8 @@ pub const Cache = struct {
         if (c.look_match) |*l| l.deinit(gpa);
         for (c.look_bodies) |*b| if (b.*) |*body| body.deinit(gpa);
         if (c.look_bodies.len > 0) gpa.free(c.look_bodies);
+        if (c.look_stream_lazy) |*l| l.deinit(gpa);
+        if (c.look_search_lazy) |*l| l.deinit(gpa);
     }
 };
 
@@ -573,7 +617,14 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
             out.* = try .init(gpa, &body.nfa);
         };
     }
-    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = inner, .look_search = look_search, .look_stream = look_stream, .look_match = look_match, .look_bodies = look_bodies };
+    errdefer {
+        for (look_bodies) |*b| if (b.*) |*body| body.deinit(gpa);
+        if (look_bodies.len > 0) gpa.free(look_bodies);
+    }
+    var look_stream_lazy: ?lazy.Cache = if (re.look) |*l| (if (l.stream_dfa) |*d| try lazy.Cache.init(gpa, d) else null) else null;
+    errdefer if (look_stream_lazy) |*l| l.deinit(gpa);
+    const look_search_lazy: ?lazy.Cache = if (re.look) |*l| (if (l.search_dfa) |*d| try lazy.Cache.init(gpa, d) else null) else null;
+    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = inner, .look_search = look_search, .look_stream = look_stream, .look_match = look_match, .look_bodies = look_bodies, .look_stream_lazy = look_stream_lazy, .look_search_lazy = look_search_lazy };
 }
 
 /// What the PikeVM searches: the input cut at the match's end where the lazy DFA found one, null
@@ -588,7 +639,7 @@ fn narrowed(re: *const Regex, c: *Cache, input: Input) ?Input {
         return input;
     };
     var from: usize = undefined;
-    const found = lazy.searchFrom(&re.nfa, d, &c.lazy.?, input, &from, if (re.prefilter) |*p| p else null) catch {
+    const found = lazy.searchFrom(&re.nfa, d, &c.lazy.?, input, &from, if (re.prefilter) |*p| p else null, null) catch {
         c.last = .lazy_dfa_fell_back;
         return input;
     };
@@ -626,10 +677,7 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     if (c.reverse) |*r| r.visited = 0;
     if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
-    if (re.look != null) {
-        c.last = .lookaround_pikevm;
-        return .{ .search = input };
-    }
+    if (re.look) |*l| return re.locateLook(l, c, input);
     if (input.whole) {
         c.last = .whole;
         return .{ .search = input };
@@ -791,12 +839,47 @@ fn rebuild(re: *const Regex, c: *Cache, haystack: []const u8, slots: []?usize) v
     }
 }
 
+/// A pattern with lookaround: where its lazy DFA, columns and lanes and all, finds the match's
+/// end, the PikeVM searches the span cut there; where it quits or gives up, or the pattern has
+/// none, the PikeVM searches the span.
+fn locateLook(re: *const Regex, l: *const Look, c: *Cache, input: Input) Located {
+    _ = re;
+    const one = c.look_searches == .one;
+    const combined = if (one) &l.stream_combined else &l.search_combined;
+    const dfa = if (one) &l.stream_dfa else &l.search_dfa;
+    const d = if (dfa.*) |*d| d else {
+        c.last = if (combined.too_many_columns) .pikevm_columns else .lookaround_pikevm;
+        return .{ .search = input };
+    };
+    // A whole search counts only a match at the span's end, which leftmost-first may pass over.
+    if (input.whole) {
+        c.last = .lookaround_pikevm;
+        return .{ .search = input };
+    }
+    const lc = if (one) &c.look_stream_lazy.? else &c.look_search_lazy.?;
+    const rows_of = c.pike.rows.?;
+    var from: usize = undefined;
+    const found = lazy.searchFrom(&combined.nfa, d, lc, input, &from, null, .{ .plan = rows_of.plan, .cache = rows_of.cache }) catch {
+        c.last = .lookaround_lazy_dfa_fell_back;
+        return .{ .search = input };
+    };
+    c.last = .lookaround_lazy_dfa;
+    const end = found orelse return .none;
+    var cut = input;
+    cut.span = .{ .start = from, .end = end };
+    return .{ .search = cut };
+}
+
 /// Lookaround's stored rows over `haystack`, before a search of a pattern with lookaround reads
 /// a byte; nothing to do for any other. One search streams the main expression's lookbehinds
 /// beside the PikeVM; every match in turn stores them, since its searches restart along the
 /// haystack.
 fn rows(re: *const Regex, c: *Cache, haystack: []const u8, searches: enum { one, all }) SearchError!void {
     const l = if (re.look) |*l| l else return;
+    c.look_searches = switch (searches) {
+        .one => .one,
+        .all => .all,
+    };
     switch (searches) {
         .one => {
             try oracle.fill(&l.stream, &c.look_stream.?, haystack);

@@ -288,7 +288,7 @@ fn anyLazy(_: void, case: *shakedown.Case) !void {
         var slots: [2]?usize = undefined;
         const want = pikevm.search(&re.nfa, &cache.pike, input, &slots);
         var from: usize = undefined;
-        if (lazy.searchFrom(&re.nfa, d, &cache.lazy.?, input, &from, if (re.prefilter) |*p| p else null)) |got| {
+        if (lazy.searchFrom(&re.nfa, d, &cache.lazy.?, input, &from, if (re.prefilter) |*p| p else null, null)) |got| {
             try testing.expectEqual(want, got);
             reached.answered += 1;
             if (re.nfa.loop_checks) reached.checked += 1;

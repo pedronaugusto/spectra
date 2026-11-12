@@ -291,7 +291,7 @@ pub fn first(set: *const Set, c: *Cache, input: Input) SearchError!?Match {
     var cut = input;
     if (set.leftmost) |*d| {
         var from: usize = undefined;
-        if (lazy.searchFrom(&set.nfa, d, &c.leftmost.?, input, &from, null)) |found| {
+        if (lazy.searchFrom(&set.nfa, d, &c.leftmost.?, input, &from, null, null)) |found| {
             c.last = .lazy_dfa;
             const end = found orelse return null;
             // Cut at the end, the PikeVM's leftmost-first match is the same: no match starts

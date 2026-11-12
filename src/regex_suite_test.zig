@@ -60,6 +60,9 @@ const Tally = struct {
     path_whole: usize = 0,
     path_lookaround_pikevm: usize = 0,
     path_lookaround_scan: usize = 0,
+    path_lookaround_lazy_dfa: usize = 0,
+    path_lookaround_lazy_dfa_fell_back: usize = 0,
+    path_pikevm_columns: usize = 0,
     /// Searches where the lazy DFA's prefilter skipped ahead.
     prefiltered: usize = 0,
     /// Patterns with a lazy DFA but no reverse one.
@@ -104,6 +107,9 @@ const Tally = struct {
             .whole => tally.path_whole += 1,
             .lookaround_pikevm => tally.path_lookaround_pikevm += 1,
             .lookaround_scan => tally.path_lookaround_scan += 1,
+            .lookaround_lazy_dfa => tally.path_lookaround_lazy_dfa += 1,
+            .lookaround_lazy_dfa_fell_back => tally.path_lookaround_lazy_dfa_fell_back += 1,
+            .pikevm_columns => tally.path_pikevm_columns += 1,
         }
     }
 };
