@@ -97,7 +97,7 @@ pub fn dev(b: *std.Build, tools: type) void {
         // The benchmark rows (spectra.md §8): CI compiles them; timings are the running machine's.
         .bench = .{
             .programs = &.{.{ .name = "bench", .source = "bench/main.zig" }},
-            .imports = benchImports,
+            .imports = tools.preflight.Bench.importsFrom(benchImports),
             .target = target,
             .optimize = optimize,
         },
