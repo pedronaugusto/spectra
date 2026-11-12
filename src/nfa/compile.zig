@@ -34,7 +34,7 @@
 //! bodies would: a pattern holding one gets no reverse automaton until it is thought again.
 //!
 //! ECMAScript's lookahead runs on the derivative engine, not on this automaton; until that is
-//! built a pattern holding one is refused (`Unsupported`, `unsupported_lookahead`).
+//! built a pattern holding one is refused (`Unsupported`, `unsupported_lookaround`).
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
@@ -61,6 +61,15 @@ pub const Options = struct {
     ecma: bool = false,
     /// The automaton of the matches read backwards, anchored, with no captures.
     reverse: bool = false,
+    /// Reversed, a lazy `.*?` before the reversed pattern, so a scan read back from the end finds
+    /// every match: where a lookahead's row is built.
+    reverse_unanchored: bool = false,
+    /// Only which strings match: no groups past the whole match, no ECMAScript empty checks or
+    /// clears, which prune ways of matching, not strings (the file's doc). A lookbehind's row is
+    /// built on such an automaton.
+    strings: bool = false,
+    /// A lookaround is a `check` state answered by the oracle; without it, refused.
+    lookaround: bool = false,
 };
 
 /// The automaton of `hir`, owned by the caller (`Nfa.deinit`).
@@ -77,16 +86,16 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
     // Reversed, only the strings count: Rust's repetitions match the same ones (the file's doc).
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse }, .reverse = options.reverse, .captures = !options.reverse };
+    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse and !options.strings }, .reverse = options.reverse, .captures = !options.reverse and !options.strings, .lookaround = options.lookaround, .reverse_unanchored = options.reverse_unanchored };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
         else
             return error.OutOfMemory,
         error.TooLarge => return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge),
-        error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookahead, error.Unsupported),
+        error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookaround, error.Unsupported),
     };
-    return c.b.finish(gpa, c.scratch, starts, hir, options.utf8, 1);
+    return c.b.finish(gpa, c.scratch, starts, if (c.captures) hir else null, options.utf8, 1);
 }
 
 /// The automaton of a set: each pattern's match in its own match state (`.match` its index),
@@ -105,7 +114,7 @@ pub fn compileSet(gpa: Allocator, hirs: []const Hir, options: Options, diagnosti
         else
             return error.OutOfMemory,
         error.TooLarge => return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge),
-        error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookahead, error.Unsupported),
+        error.Unsupported => return refuse(diagnostic, options.span, .unsupported_lookaround, error.Unsupported),
     };
     return b.finish(gpa, scratch.allocator(), starts, null, options.utf8, @intCast(hirs.len));
 }
@@ -169,6 +178,7 @@ const BState = union(enum) {
     clear: struct { first: u32, end: u32, next: u32 },
     loop_begin: u32,
     loop_end: u32,
+    check: struct { row: u32, negated: bool, next: u32 },
     fail,
     match: u32,
 };
@@ -260,8 +270,13 @@ const Compiler = struct {
     hir: *const Hir,
     repeats: Repeats,
     reverse: bool,
-    /// Whether groups past the whole match are compiled: not reversed, nor in a set.
+    /// Whether groups past the whole match are compiled: not reversed, nor in a set, nor for
+    /// strings alone.
     captures: bool,
+    /// Whether a lookaround becomes a `check` state; else it is refused.
+    lookaround: bool = false,
+    /// Reversed, whether a lazy `.*?` comes before the reversed pattern.
+    reverse_unanchored: bool = false,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
@@ -280,7 +295,8 @@ const Compiler = struct {
             const m = try c.b.add(.{ .match = 0 });
             c.b.patch(body.end, m);
             const root = c.props[@backingInt(c.hir.root)];
-            return .{ .anchored = body.start, .unanchored = body.start, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
+            const unanchored = if (c.reverse_unanchored) try c.b.unanchored(body.start) else body.start;
+            return .{ .anchored = body.start, .unanchored = unanchored, .empty_ok = root.empty_ok, .end_anchored = root.end_anchored };
         }
         const s0 = try c.pattern(0);
         const root = c.props[@backingInt(c.hir.root)];
@@ -343,7 +359,12 @@ const Compiler = struct {
                     }
                     break :blk p;
                 },
-                .lookahead => return error.Unsupported,
+                // Zero-width, reading nothing of the match; its groups are its body's, which an
+                // enclosing quantifier clears with the rest.
+                .lookaround => |la| blk: {
+                    if (!c.lookaround) return error.Unsupported;
+                    break :blk .{ .empty_ok = true, .only_empty = true, .anchored = false, .groups = c.prop(la.sub, i).groups };
+                },
             };
         }
     }
@@ -421,7 +442,11 @@ const Compiler = struct {
                     frame.min = min;
                     frame.max = max;
                 },
-                .lookahead => return error.Unsupported,
+                .lookaround => |la| {
+                    if (!c.lookaround) return error.Unsupported;
+                    const id = try c.b.add(.{ .check = .{ .row = la.index, .negated = la.negated, .next = unset } });
+                    return .{ .start = id, .end = id };
+                },
             }
             try c.frames.append(c.scratch, frame);
             return null;
@@ -791,6 +816,7 @@ const Builder = struct {
             .capture => |*cap| cap.next = to,
             .clear => |*cl| cl.next = to,
             .loop_begin, .loop_end => |*next| next.* = to,
+            .check => |*k| k.next = to,
             .alternation => |*u| {
                 aegis.assert.invariant(u.filled < u.len, "an alternation is joined to as many states as it holds");
                 const slot = if (u.lazy) u.len - 1 - u.filled else u.filled;
@@ -817,6 +843,7 @@ const Builder = struct {
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = move.id(cl.next) } },
                 .loop_begin => |next| .{ .loop_begin = move.id(next) },
                 .loop_end => |next| .{ .loop_end = move.id(next) },
+                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .next = move.id(k.next) } },
                 .sparse => |slice| blk: {
                     try room(b.trans.items.len, slice.len);
                     const start: u32 = @intCast(b.trans.items.len);
@@ -852,6 +879,7 @@ const Builder = struct {
         var alternatives: usize = 0;
         var looks: Nfa.LookSet = .empty;
         var loop_checks = false;
+        var checks = false;
         for (states, remap) |s, *r| {
             switch (s) {
                 .empty => {
@@ -866,6 +894,7 @@ const Builder = struct {
                 },
                 .look => |l| looks.insert(l.look),
                 .loop_begin, .loop_end => loop_checks = true,
+                .check => checks = true,
                 else => {},
             }
             r.* = count;
@@ -932,6 +961,7 @@ const Builder = struct {
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = map.id(cl.next) } },
                 .loop_begin => |next| .{ .loop_begin = map.id(next) },
                 .loop_end => |next| .{ .loop_end = map.id(next) },
+                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .next = map.id(k.next) } },
                 .fail => .fail,
                 .match => |p| .{ .match = p },
             };
@@ -979,6 +1009,7 @@ const Builder = struct {
             .end_anchored = starts.end_anchored,
             .loop_checks = loop_checks,
             .patterns = patterns,
+            .checks = checks,
         };
     }
 };

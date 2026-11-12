@@ -265,7 +265,7 @@ test "lookahead is refused by name until the derivative engine runs it" {
     const hir = try hirOf(state.allocator(), "a(?=b)", ecma);
     var d: parse_mod.Diagnostic = .{};
     try testing.expectError(error.Unsupported, compile_mod.compile(testing.allocator, &hir, .{ .span = .{ .start = 0, .end = 6 } }, &d));
-    try testing.expectEqual(parse_mod.Reason.unsupported_lookahead, d.reason);
+    try testing.expectEqual(parse_mod.Reason.unsupported_lookaround, d.reason);
     try testing.expectEqual(@as(u32, 6), d.span.end);
 }
 
@@ -577,6 +577,7 @@ fn expectWellFormed(nfa: *const Nfa) !void {
         },
         .capture => |cap| try testing.expect(cap.slot < nfa.slots() and cap.slot / 2 == cap.group and cap.next.raw() < n),
         .clear => |cl| try testing.expect(cl.first < cl.end and cl.end <= nfa.slots() and cl.first % 2 == 0 and cl.end % 2 == 0 and cl.next.raw() < n),
+        .check => |k| try testing.expect(k.next.raw() < n),
         .loop_begin, .loop_end => |next| {
             try testing.expect(next.raw() < n);
             loops += 1;

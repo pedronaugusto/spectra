@@ -398,6 +398,7 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                             if (!read) break;
                             id = next;
                         },
+                        .check => aegis.assert.never("the PikeVM answers lookaround once the main expression's phase is in"),
                     }
                 }
             },

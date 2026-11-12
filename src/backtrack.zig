@@ -201,6 +201,7 @@ fn from(nfa: *const Nfa, c: *Cache, input: Input, width: usize, start: usize, sl
                             if (!read) break;
                             id = next;
                         },
+                        .check => aegis.assert.never("the backtracker is given no automaton with lookaround"),
                         .fail => break,
                         .match => return pos,
                     }

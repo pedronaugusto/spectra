@@ -85,8 +85,8 @@ fn write(hir: *const Hir, index: Hir.Index, w: *std.Io.Writer) anyerror!void {
             if (i != 0) try w.writeAll("|");
             try write(hir, c, w);
         },
-        .lookahead => |l| {
-            try w.print("(ahead{s}:", .{if (l.negated) "!" else ""});
+        .lookaround => |l| {
+            try w.print("({t}{s}#{d}:", .{ l.kind, if (l.negated) "!" else "", l.index });
             try write(hir, l.sub, w);
             try w.writeAll(")");
         },
@@ -305,18 +305,17 @@ test "ECMAScript: i closes by Canonicalize without u, by simple folding with it"
     try testing.expect(try takes("\\p{space}", ecma, ' '));
 }
 
-test "ECMAScript: what it cannot run is refused by name, and a lookahead is kept" {
+test "ECMAScript: what it cannot run is refused by name, and lookarounds are kept, numbered in preorder" {
     try expectRefused("(a)\\1", ecma, error.Unsupported, .unsupported_backreference);
     try expectRefused("(?<n>a)\\k<n>", ecma, error.Unsupported, .unsupported_backreference);
-    try expectRefused("(?<=a)b", ecma, error.Unsupported, .unsupported_lookbehind);
-    try expectRefused("(?<!a)b", ecma, error.Unsupported, .unsupported_lookbehind);
-    try expectRefused("(?=(?=a))", ecma, error.Unsupported, .unsupported_nested_lookaround);
-    try expectRefused("(?!(?<=a))", ecma, error.Unsupported, .unsupported_lookbehind);
-    try expectRefused("(?=(?!a))", ecma, error.Unsupported, .unsupported_nested_lookaround);
+    try expectText("(?<=a)b", ecma, "<(behind#0:\"a\") \"b\">");
+    try expectText("(?<!a)b", ecma, "<(behind!#0:\"a\") \"b\">");
+    try expectText("(?=(?=a))", ecma, "(ahead#0:(ahead#1:\"a\"))");
+    try expectText("(?!(?<=a))(?=b)", ecma, "<(ahead!#0:(behind#1:\"a\")) (ahead#2:\"b\")>");
     try expectRefused("\\p{RGI_Emoji}", sets, error.Unsupported, .unsupported_unicode_property);
     try expectRefused("[\\p{RGI_Emoji}]", sets, error.Unsupported, .unsupported_unicode_property);
-    try expectText("(?=a)(?!b)c", ecma, "<(ahead:\"a\") (ahead!:\"b\") \"c\">");
-    try expectText("(?=(a))(?=(b))", ecma, "<(ahead:(#1:\"a\")) (ahead:(#2:\"b\"))>");
+    try expectText("(?=a)(?!b)c", ecma, "<(ahead#0:\"a\") (ahead!#1:\"b\") \"c\">");
+    try expectText("(?=(a))(?=(b))", ecma, "<(ahead#0:(#1:\"a\")) (ahead#1:(#2:\"b\"))>");
 }
 
 test "ECMAScript without u: a code point past U+FFFF is whole or refused" {

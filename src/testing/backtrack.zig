@@ -95,6 +95,7 @@ fn at(gpa: std.mem.Allocator, nfa: *const Nfa, haystack: []const u8, span: Span,
                         if (!read) break;
                         id = next;
                     },
+                    .check => @panic("the test backtracker reads no automaton with lookaround"),
                     .fail => break,
                     .match => return pos,
                 }

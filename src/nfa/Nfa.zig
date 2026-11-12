@@ -44,6 +44,8 @@ end_anchored: bool,
 loop_checks: bool,
 /// The patterns whose matches it tells apart: 1 but for a set's automaton.
 patterns: u32 = 1,
+/// Some state is a `check`: a search needs the oracle's rows.
+checks: bool = false,
 
 pub const Transition = struct {
     lo: u8,
@@ -81,6 +83,10 @@ pub const State = union(enum) {
     /// innermost `loop_begin`: an iteration past the minimum that matched empty fails
     /// (RepeatMatcher's step 2.b). Quantifiers nest, so one bit a thread carries answers it.
     loop_end: StateId,
+    /// Lookaround `row` (its number) holds where the search is, or with `negated` does not:
+    /// then `next`. Answered by the oracle (oracle.zig), which builds each row before a scan reads
+    /// it.
+    check: struct { row: u32, negated: bool, next: StateId },
     /// Matches nothing: an empty class.
     fail,
     /// A match of pattern `match`: always 0 but in a set's automaton, which holds one match

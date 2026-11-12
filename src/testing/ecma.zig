@@ -2,9 +2,11 @@
 //! HIR: each node a matcher that takes a state and a continuation and returns the state the
 //! whole match ends in, or failure. A quantifier is RepeatMatcher, with its two rules: the
 //! atom's captures are cleared before each iteration, and an iteration past the minimum that
-//! matched empty fails. A lookahead stops at its first success and keeps that success's
-//! captures. Nothing here reads the automaton, so it is what the engines' ECMAScript
-//! matching is checked against.
+//! matched empty fails. A lookaround stops at its first success and keeps that success's
+//! captures. A lookbehind's body is matched in the backward direction (§22.2.2's `direction`):
+//! a concatenation's terms right to left, each character read before the position, a group's
+//! range from where it ends back to where it began. Nothing here reads the automaton, so it is
+//! what the engines' ECMAScript matching is checked against.
 //!
 //! It reads the haystack's code points, ECMAScript's reading with `u` or `v`, and without them
 //! the same wherever no code point is past U+FFFF. Flags are already in the HIR: case folding
@@ -46,13 +48,40 @@ pub fn exec(arena: Allocator, hir: *const Hir, haystack: []const u8, budget: usi
     @memset(none, null);
     var start: usize = 0;
     while (start <= m.input.len) : (start += 1) {
-        const found = try m.match(hir.root, .{ .end = start, .caps = none }, &.done) orelse continue;
+        const found = try m.match(hir.root, .{ .end = start, .caps = none }, &.done, .forward) orelse continue;
         const spans = try arena.alloc(?Span, hir.captures + 1);
         spans[0] = .{ .start = offsets.items[start], .end = offsets.items[found.end] };
         for (spans[1..], found.caps[1..]) |*s, c| s.* = if (c) |r| .{ .start = offsets.items[r[0]], .end = offsets.items[r[1]] } else null;
         return spans;
     }
     return null;
+}
+
+/// Whether lookaround `node` holds at byte `at` of `haystack`, as ECMA-262 evaluates it there:
+/// its body matched forward from `at` for a lookahead, backward from `at` for a lookbehind, to
+/// a first success; before `negated`. `at` begins a code point. `budget` bounds the matcher
+/// calls.
+pub fn lookaroundHolds(arena: Allocator, hir: *const Hir, node: Hir.Index, haystack: []const u8, at: usize, budget: usize) Error!bool {
+    const la = hir.node(node).lookaround;
+    var points: std.ArrayList(u21) = .empty;
+    var start: ?usize = null;
+    var i: usize = 0;
+    while (i <= haystack.len) {
+        if (i == at) start = points.items.len;
+        if (i == haystack.len) break;
+        const n = std.unicode.utf8ByteSequenceLength(haystack[i]) catch return error.InvalidUtf8;
+        if (i + n > haystack.len) return error.InvalidUtf8;
+        try points.append(arena, std.unicode.utf8Decode(haystack[i..][0..n]) catch return error.InvalidUtf8);
+        i += n;
+    }
+    var m: Matcher = .{ .arena = arena, .hir = hir, .input = points.items, .left = budget };
+    const none = try arena.alloc(?[2]usize, hir.captures + 1);
+    @memset(none, null);
+    const found = try m.match(la.sub, .{ .end = start orelse return error.InvalidUtf8, .caps = none }, &.done, switch (la.kind) {
+        .ahead => .forward,
+        .behind => .backward,
+    });
+    return found != null;
 }
 
 /// The specification's MatchState: where the input is read to, and each group's captured
@@ -62,16 +91,20 @@ const State = struct {
     caps: []const ?[2]usize,
 };
 
+/// The specification's `direction`: forward, or backward inside a lookbehind.
+pub const Dir = enum { forward, backward };
+
 /// The specification's MatcherContinuation, one closure per case.
 const Cont = union(enum) {
-    /// The pattern's end, and a lookahead's: success, in the state reached.
+    /// The pattern's end, and a lookaround's: success, in the state reached.
     done,
-    /// The rest of a concatenation, then `next`.
-    rest: struct { nodes: []const Hir.Index, next: *const Cont },
-    /// A group's close: its range from `start`, then `next`.
-    close: struct { group: u32, start: usize, next: *const Cont },
+    /// The rest of a concatenation, then `next`: the terms still to match, in the order the
+    /// direction matches them.
+    rest: struct { nodes: []const Hir.Index, dir: Dir, next: *const Cont },
+    /// A group's close: its range between `start` and where it ends, then `next`.
+    close: struct { group: u32, start: usize, dir: Dir, next: *const Cont },
     /// RepeatMatcher's `d`: one iteration matched from `from`; the rest of the quantifier.
-    repeat: struct { rep: Hir.Repetition, min: u32, max: ?u32, from: usize, parens: Parens, next: *const Cont },
+    repeat: struct { rep: Hir.Repetition, min: u32, max: ?u32, from: usize, parens: Parens, dir: Dir, next: *const Cont },
 };
 
 /// The groups inside a quantified atom: `parenIndex + 1` to `parenIndex + parenCount`.
@@ -88,61 +121,79 @@ const Matcher = struct {
         m.left -= 1;
     }
 
-    /// The node's matcher, run on `x` with continuation `c`.
-    fn match(m: *Matcher, index: Hir.Index, x: State, c: *const Cont) Error!?State {
+    /// The code point the direction reads next from `at`, and where the read leaves it.
+    fn read(m: *const Matcher, at: usize, dir: Dir) ?struct { cp: u21, to: usize } {
+        return switch (dir) {
+            .forward => if (at < m.input.len) .{ .cp = m.input[at], .to = at + 1 } else null,
+            .backward => if (at > 0) .{ .cp = m.input[at - 1], .to = at - 1 } else null,
+        };
+    }
+
+    /// The node's matcher, run on `x` with continuation `c`, in direction `dir`.
+    fn match(m: *Matcher, index: Hir.Index, x: State, c: *const Cont, dir: Dir) Error!?State {
         try m.step();
         switch (m.hir.node(index)) {
             .empty => return m.proceed(c, x),
             .literal => |bytes| {
-                var at = x.end;
+                var points: std.ArrayList(u21) = .empty;
                 var view = (std.unicode.Utf8View.init(bytes) catch return error.Unsupported).iterator();
-                while (view.nextCodepoint()) |cp| {
-                    if (at >= m.input.len or m.input[at] != cp) return null;
-                    at += 1;
+                while (view.nextCodepoint()) |cp| try points.append(m.arena, cp);
+                // Each character its own term: backward, the last is read first.
+                if (dir == .backward) std.mem.reverse(u21, points.items);
+                var at = x.end;
+                for (points.items) |cp| {
+                    const r = m.read(at, dir) orelse return null;
+                    if (r.cp != cp) return null;
+                    at = r.to;
                 }
                 return m.proceed(c, .{ .end = at, .caps = x.caps });
             },
             .unicode_class => |ranges| {
-                if (x.end >= m.input.len) return null;
-                const cp = m.input[x.end];
-                for (ranges) |r| if (r[0] <= cp and cp <= r[1]) return m.proceed(c, .{ .end = x.end + 1, .caps = x.caps });
+                const r = m.read(x.end, dir) orelse return null;
+                for (ranges) |range| if (range[0] <= r.cp and r.cp <= range[1]) return m.proceed(c, .{ .end = r.to, .caps = x.caps });
                 return null;
             },
             .byte_class => return error.Unsupported,
             .look => |look| return if (try m.holds(look, x.end)) m.proceed(c, x) else null,
             .concat => |slice| {
                 const nodes = m.hir.childrenOf(slice);
-                return m.match(nodes[0], x, &.{ .rest = .{ .nodes = nodes[1..], .next = c } });
+                return switch (dir) {
+                    .forward => m.match(nodes[0], x, &.{ .rest = .{ .nodes = nodes[1..], .dir = dir, .next = c } }, dir),
+                    .backward => m.match(nodes[nodes.len - 1], x, &.{ .rest = .{ .nodes = nodes[0 .. nodes.len - 1], .dir = dir, .next = c } }, dir),
+                };
             },
             .alternation => |slice| {
-                for (m.hir.childrenOf(slice)) |alt| if (try m.match(alt, x, c)) |r| return r;
+                for (m.hir.childrenOf(slice)) |alt| if (try m.match(alt, x, c, dir)) |r| return r;
                 return null;
             },
-            .capture => |cap| return m.match(cap.sub, x, &.{ .close = .{ .group = cap.index, .start = x.end, .next = c } }),
-            .lookahead => |la| {
-                const r = try m.match(la.sub, x, &.done);
+            .capture => |cap| return m.match(cap.sub, x, &.{ .close = .{ .group = cap.index, .start = x.end, .dir = dir, .next = c } }, dir),
+            .lookaround => |la| {
+                const r = try m.match(la.sub, x, &.done, switch (la.kind) {
+                    .ahead => .forward,
+                    .behind => .backward,
+                });
                 if (la.negated) return if (r == null) m.proceed(c, x) else null;
                 const y = r orelse return null;
                 return m.proceed(c, .{ .end = x.end, .caps = y.caps });
             },
-            .repetition => |rep| return m.repeat(rep, rep.min, rep.max, x, c, m.parensOf(rep.sub)),
+            .repetition => |rep| return m.repeat(rep, rep.min, rep.max, x, c, m.parensOf(rep.sub), dir),
         }
     }
 
     /// RepeatMatcher(m, min, max, greedy, x, c, parenIndex, parenCount).
-    fn repeat(m: *Matcher, rep: Hir.Repetition, min: u32, max: ?u32, x: State, c: *const Cont, parens: Parens) Error!?State {
+    fn repeat(m: *Matcher, rep: Hir.Repetition, min: u32, max: ?u32, x: State, c: *const Cont, parens: Parens, dir: Dir) Error!?State {
         try m.step();
         if (max == 0) return m.proceed(c, x);
-        const d: Cont = .{ .repeat = .{ .rep = rep, .min = min, .max = max, .from = x.end, .parens = parens, .next = c } };
+        const d: Cont = .{ .repeat = .{ .rep = rep, .min = min, .max = max, .from = x.end, .parens = parens, .dir = dir, .next = c } };
         const caps = try m.arena.dupe(?[2]usize, x.caps);
         for (caps[parens.first..parens.end]) |*k| k.* = null;
         const xr: State = .{ .end = x.end, .caps = caps };
-        if (min != 0) return m.match(rep.sub, xr, &d);
+        if (min != 0) return m.match(rep.sub, xr, &d, dir);
         if (!rep.greedy) {
             if (try m.proceed(c, x)) |z| return z;
-            return m.match(rep.sub, xr, &d);
+            return m.match(rep.sub, xr, &d, dir);
         }
-        if (try m.match(rep.sub, xr, &d)) |z| return z;
+        if (try m.match(rep.sub, xr, &d, dir)) |z| return z;
         return m.proceed(c, x);
     }
 
@@ -153,11 +204,17 @@ const Matcher = struct {
             .done => return y,
             .rest => |r| {
                 if (r.nodes.len == 0) return m.proceed(r.next, y);
-                return m.match(r.nodes[0], y, &.{ .rest = .{ .nodes = r.nodes[1..], .next = r.next } });
+                return switch (r.dir) {
+                    .forward => m.match(r.nodes[0], y, &.{ .rest = .{ .nodes = r.nodes[1..], .dir = r.dir, .next = r.next } }, r.dir),
+                    .backward => m.match(r.nodes[r.nodes.len - 1], y, &.{ .rest = .{ .nodes = r.nodes[0 .. r.nodes.len - 1], .dir = r.dir, .next = r.next } }, r.dir),
+                };
             },
             .close => |cl| {
                 const caps = try m.arena.dupe(?[2]usize, y.caps);
-                caps[cl.group] = .{ cl.start, y.end };
+                caps[cl.group] = switch (cl.dir) {
+                    .forward => .{ cl.start, y.end },
+                    .backward => .{ y.end, cl.start },
+                };
                 return m.proceed(cl.next, .{ .end = y.end, .caps = caps });
             },
             .repeat => |d| {
@@ -165,7 +222,7 @@ const Matcher = struct {
                 if (d.min == 0 and y.end == d.from) return null;
                 const min = if (d.min == 0) 0 else d.min - 1;
                 const max = if (d.max) |n| n - 1 else null;
-                return m.repeat(d.rep, min, max, y, d.next, d.parens);
+                return m.repeat(d.rep, min, max, y, d.next, d.parens, d.dir);
             },
         }
     }
@@ -185,7 +242,7 @@ const Matcher = struct {
                 m.walk(cap.sub, p);
             },
             .repetition => |rep| m.walk(rep.sub, p),
-            .lookahead => |la| m.walk(la.sub, p),
+            .lookaround => |la| m.walk(la.sub, p),
             .concat, .alternation => |slice| for (m.hir.childrenOf(slice)) |child| m.walk(child, p),
             else => {},
         }

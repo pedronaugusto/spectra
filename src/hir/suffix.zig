@@ -138,7 +138,7 @@ const Len = struct { min: usize, max: ?usize };
 
 fn nodeLen(hir: *const Hir, index: Hir.Index) Len {
     return switch (hir.node(index)) {
-        .empty, .look, .lookahead => .{ .min = 0, .max = 0 },
+        .empty, .look, .lookaround => .{ .min = 0, .max = 0 },
         .literal => |bytes| .{ .min = bytes.len, .max = bytes.len },
         .byte_class => .{ .min = 1, .max = 1 },
         .unicode_class => |ranges| if (ranges.len == 0) .{ .min = 1, .max = 1 } else .{ .min = utf8Len(ranges[0][0]), .max = utf8Len(ranges[ranges.len - 1][1]) },
@@ -216,7 +216,7 @@ fn partReads(hir: *const Hir, part: Part, b: u8) bool {
 fn nodeReads(hir: *const Hir, index: Hir.Index, b: u8) bool {
     return switch (hir.node(index)) {
         .empty, .look => false,
-        .lookahead => true,
+        .lookaround => true,
         .literal => |bytes| std.mem.indexOfScalar(u8, bytes, b) != null,
         .byte_class => |ranges| inRanges(u8, ranges, b),
         .unicode_class => |ranges| b >= 0x80 or inRanges(u21, ranges, b),
@@ -308,7 +308,7 @@ fn classOf(hir: *const Hir, index: Hir.Index) ?Class {
 fn nodeApart(hir: *const Hir, index: Hir.Index, class: Class) bool {
     return switch (hir.node(index)) {
         .empty, .look => true,
-        .lookahead => false,
+        .lookaround => false,
         .literal => |bytes| classApartFromLiteral(class, bytes),
         .unicode_class => |r| classesApart(class, .{ .unicode = r }),
         .byte_class => |r| classesApart(class, .{ .bytes = r }),

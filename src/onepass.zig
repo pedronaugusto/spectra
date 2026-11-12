@@ -73,7 +73,7 @@ pub const Dfa = struct {
 /// The one-pass DFA of `nfa` in at most `limit` bytes, or null where the pattern is not one-pass
 /// or the table is larger.
 pub fn build(gpa: Allocator, nfa: *const Nfa, limit: usize) Allocator.Error!?Dfa {
-    if (nfa.loop_checks or nfa.slots() > 32) return null;
+    if (nfa.loop_checks or nfa.checks or nfa.slots() > 32) return null;
     for (nfa.states) |s| if (s == .clear) return null;
     var b: Builder = .{ .gpa = gpa, .nfa = nfa, .limit = limit };
     defer b.deinit();
@@ -210,7 +210,7 @@ const Builder = struct {
                         id = alts[0];
                     },
                     .fail => break,
-                    .clear, .loop_begin, .loop_end => aegis.assert.never("a one-pass automaton has no clear and no empty check"),
+                    .clear, .loop_begin, .loop_end, .check => aegis.assert.never("a one-pass automaton has no clear, no empty check and no lookaround"),
                 }
             }
         }

@@ -9,6 +9,8 @@ children: []const Index,
 root: Index,
 /// How many capturing groups, as the pattern's.
 captures: u32,
+/// How many lookarounds, numbered in preorder: one inside another has a higher number.
+lookarounds: u32 = 0,
 
 pub const Index = enum(u32) { _ };
 
@@ -29,8 +31,8 @@ pub const Node = union(enum) {
     concat: Slice,
     /// The children, first preferred.
     alternation: Slice,
-    /// ECMAScript's `(?=...)` and `(?!...)`, which the derivative engine runs.
-    lookahead: Lookahead,
+    /// ECMAScript's `(?=...)`, `(?!...)`, `(?<=...)` and `(?<!...)`.
+    lookaround: Lookaround,
 };
 
 pub const Slice = struct { start: u32, len: u32 };
@@ -50,9 +52,13 @@ pub const Capture = struct {
     sub: Index,
 };
 
-pub const Lookahead = struct {
+pub const Lookaround = struct {
+    /// Ahead: decided by the haystack after the position; behind: by the haystack before it.
+    kind: enum { ahead, behind },
     negated: bool,
     sub: Index,
+    /// Its number, in preorder from 0: what its row in the oracle is kept by.
+    index: u32,
 };
 
 /// A zero-width assertion, each the exact test it makes.

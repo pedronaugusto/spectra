@@ -338,7 +338,7 @@ pub const Extractor = struct {
         while (stack.items.len != 0) {
             const frame = &stack.items[stack.items.len - 1];
             const finished: ?Seq = switch (hir.node(frame.node)) {
-                .empty, .look, .lookahead => try Seq.singleton(arena, .{ .bytes = &.{}, .exact = true }),
+                .empty, .look, .lookaround => try Seq.singleton(arena, .{ .bytes = &.{}, .exact = true }),
                 .literal => |bytes| blk: {
                     var seq = try Seq.singleton(arena, .{ .bytes = bytes, .exact = true });
                     e.enforceLen(&seq);

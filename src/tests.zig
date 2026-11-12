@@ -11,6 +11,7 @@ test {
     _ = @import("set_test.zig");
     _ = @import("automaton_test.zig");
     _ = @import("sweep_queries_test.zig");
+    _ = @import("oracle_test.zig");
     _ = @import("regex_suite_test.zig");
     _ = @import("ecma_verdicts_test.zig");
     _ = @import("testing/ecma.zig");

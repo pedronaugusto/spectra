@@ -9,7 +9,7 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/hir/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig", "src/hir/suffix.zig", "src/hir/inner.zig" } },
     .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/nfa/Nfa.zig", "src/nfa/look.zig", "src/nfa/compile.zig" } },
     .{ .name = "prefilters", .patterns = &.{ "src/prefilter/rank.zig", "src/prefilter.zig" } },
-    .{ .name = "engines", .patterns = &.{ "src/pikevm.zig", "src/lazy.zig", "src/backtrack.zig", "src/onepass.zig" } },
+    .{ .name = "engines", .patterns = &.{ "src/pikevm.zig", "src/lazy.zig", "src/backtrack.zig", "src/onepass.zig", "src/oracle.zig" } },
     .{ .name = "meta", .patterns = &.{ "src/Automaton.zig", "src/Regex.zig", "src/Set.zig", "src/strategy.zig" } },
     .{ .name = "public", .patterns = &.{"src/spectra.zig"} },
 };
@@ -65,6 +65,7 @@ pub const required = [_][]const u8{
     "src/lazy.zig",
     "src/backtrack.zig",
     "src/onepass.zig",
+    "src/oracle.zig",
     "src/Automaton.zig",
     "src/Regex.zig",
     "src/Set.zig",

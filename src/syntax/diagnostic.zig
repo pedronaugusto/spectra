@@ -67,8 +67,6 @@ pub const Reason = enum {
     invalid_utf8_class,
     /// ECMAScript constructs spectra refuses to run, by name.
     unsupported_backreference,
-    unsupported_lookbehind,
-    unsupported_nested_lookaround,
     /// A property with no data here: Age, and `v`'s properties of strings.
     unsupported_unicode_property,
     /// ECMAScript without `u` or `v`: half of a code point past U+FFFF named alone. A UTF-16
@@ -80,8 +78,8 @@ pub const Reason = enum {
     nfa_too_large,
     /// What one search's `Cache` would hold, past `Limits.cache`: many groups in a long pattern.
     cache_too_large,
-    /// ECMAScript's lookahead, which the derivative engine runs: refused until that engine is in.
-    unsupported_lookahead,
+    /// ECMAScript's lookahead and lookbehind: refused until the oracle runs them.
+    unsupported_lookaround,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.
     regexp_flag_invalid,
 };

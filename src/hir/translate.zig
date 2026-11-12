@@ -101,7 +101,7 @@ const Work = union(enum) {
     alternation: u32,
     repetition: Ast.Repetition,
     group: struct { capture: ?Capture, saved: Flags },
-    lookahead: struct { negated: bool },
+    lookaround: struct { kind: @FieldType(Hir.Lookaround, "kind"), negated: bool, index: u32 },
 };
 
 /// A class being evaluated: its code points, and under `v` its strings of other than one.
@@ -148,8 +148,8 @@ const Translator = struct {
     flags: Flags,
     nodes: std.ArrayList(Hir.Node) = .empty,
     children: std.ArrayList(Hir.Index) = .empty,
-    /// Lookarounds open around what is being read.
-    lookaround: u32 = 0,
+    /// Lookarounds met so far: the next one's number.
+    lookarounds: u32 = 0,
 
     fn fail(t: *Translator, span: Ast.Span, reason: Reason) error{Invalid} {
         if (t.diagnostic) |d| d.* = .{ .span = span, .reason = reason };
@@ -216,10 +216,9 @@ const Translator = struct {
                     try results.append(t.arena, try t.add(.{ .capture = .{ .index = c.index, .name = c.name, .sub = sub } }));
                 }
             },
-            .lookahead => |l| {
-                t.lookaround -= 1;
+            .lookaround => |l| {
                 const sub = results.pop().?;
-                try results.append(t.arena, try t.add(.{ .lookahead = .{ .negated = l.negated, .sub = sub } }));
+                try results.append(t.arena, try t.add(.{ .lookaround = .{ .kind = l.kind, .negated = l.negated, .sub = sub, .index = l.index } }));
             },
         };
         aegis.assert.invariant(results.items.len == 1, "every node left one result");
@@ -228,6 +227,7 @@ const Translator = struct {
             .children = try t.children.toOwnedSlice(t.arena),
             .root = results.items[0],
             .captures = t.ast.captures,
+            .lookarounds = t.lookarounds,
         };
     }
 
@@ -332,10 +332,13 @@ const Translator = struct {
             },
             .concat => |s| try t.concatWork(t.ast.childrenOf(s), work),
             .lookaround => |l| {
-                if (l.direction == .behind) return t.unsupported(n.span, .unsupported_lookbehind);
-                if (t.lookaround != 0) return t.unsupported(n.span, .unsupported_nested_lookaround);
-                t.lookaround += 1;
-                try work.append(t.arena, .{ .lookahead = .{ .negated = l.negated } });
+                // Numbered as met, which is preorder: a lookaround inside another comes after it.
+                const number = t.lookarounds;
+                t.lookarounds += 1;
+                try work.append(t.arena, .{ .lookaround = .{ .kind = switch (l.direction) {
+                    .ahead => .ahead,
+                    .behind => .behind,
+                }, .negated = l.negated, .index = number } });
                 try work.append(t.arena, .{ .visit = l.sub });
             },
             .backreference => return t.unsupported(n.span, .unsupported_backreference),

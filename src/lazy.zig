@@ -146,6 +146,8 @@ pub const Dfa = struct {
 /// The lazy DFA of `nfa` with a store of `capacity` bytes, or null when that cannot hold the
 /// fewest states a search needs: the pattern then has no lazy DFA (`Regex.engines`).
 pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction, kind: Kind) ?Dfa {
+    // A lookaround's truth is a position's, not a byte's: not in the first cut (spectra.md §3.1).
+    if (nfa.checks) return null;
     var d: Dfa = undefined;
     d.direction = direction;
     d.kind = kind;
@@ -750,6 +752,7 @@ fn closure(nfa: *const Nfa, c: *Cache, from: Nfa.StateId, decide: Decide) void {
                     if (!read) break;
                     id = next_id;
                 },
+                .check => aegis.assert.never("a lazy DFA is built for no automaton with lookaround"),
             }
         }
     }
