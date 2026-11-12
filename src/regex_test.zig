@@ -1084,3 +1084,42 @@ test "fuzz: any bytes as a pattern in any dialect are refused by name, or compil
     if (fuzzing) return;
     try testing.expect(compiled_bytes > 300);
 }
+
+test "Teddy runs on the widest kernel this CPU has, says which, and finds what a plain search finds" {
+    const builtin = @import("builtin");
+    const ladar = @import("ladar");
+    const kernel = prefilter.teddyKernel();
+    // The test log's record of which kernel ran: on an x86-64 runner with AVX2, the AVX2 one.
+    std.debug.print("spectra: Teddy kernel on this CPU: {s}\n", .{if (kernel) |k| @tagName(k) else "none"});
+    if (comptime builtin.cpu.arch == .x86_64 and ladar.available(.x86_avx2)) {
+        if (ladar.has(.x86_avx2)) try testing.expectEqual(prefilter.Kernel.x86_avx2, kernel.?);
+    }
+    const k = kernel orelse return;
+    var state: std.heap.ArenaAllocator = .init(gpa);
+    defer state.deinit();
+    const a = state.allocator();
+    const pattern = "(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet)\\d";
+    var re = try compiled(pattern, .{});
+    defer re.deinit();
+    try testing.expect(re.prefilter.? == .teddy and re.prefilter.?.teddy.kernel == k);
+    var plain = try Regex.compile(gpa, .init(pattern), .{ .prefilter = false });
+    defer plain.deinit();
+    var c = try re.cache(gpa);
+    defer c.deinit(gpa);
+    var pc = try plain.cache(gpa);
+    defer pc.deinit(gpa);
+    // A long haystack, the literals spread through it, across many of the kernel's blocks.
+    var prng: std.Random.DefaultPrng = .init(0x7edd);
+    const random = prng.random();
+    const words = [_][]const u8{ "alpha1", "bravo", "charlie2", "delt", "echo3", "foxtrot", "golf4", "hote", "india5", "juliet6" };
+    var hay: std.ArrayList(u8) = .empty;
+    while (hay.items.len < 20_000) {
+        if (random.uintLessThan(usize, 20) == 0) try hay.appendSlice(a, words[random.uintLessThan(usize, words.len)]) else try hay.append(a, "abcdefghijklmnopqrstuvwxyz0123456789 "[random.uintLessThan(usize, 37)]);
+    }
+    var it = re.findAll(&c, hay.items);
+    var pit = plain.findAll(&pc, hay.items);
+    var n: usize = 0;
+    while (try pit.next()) |want| : (n += 1) try testing.expectEqual(want, (try it.next()).?);
+    try testing.expectEqual(null, try it.next());
+    try testing.expect(n > 100);
+}
