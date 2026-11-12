@@ -14,6 +14,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Benchmark rows (`bench/main.zig`, `zig build bench`): rebar's shapes over a synthetic text, compile time by pattern
+  class, sets of 10 to 1000 patterns, zod's lookaround patterns, replace and split. CI compiles them.
 - RE2's search tests (the pattern and text table of re2/testing/search_test.cc) run against the test backtracker,
   with RE2's licence in LICENSES/re2-BSD.txt.
 - `Regex.replace` (a `Replacement`: the dialect's `$` template, literal bytes, or a function; `limit` null for all,

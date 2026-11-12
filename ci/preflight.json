@@ -26,7 +26,8 @@
   },
   "glint_paths": [
     "src",
-    "build.zig"
+    "build.zig",
+    "bench"
   ],
   "docs": {
     "zig build docs -- usage": {

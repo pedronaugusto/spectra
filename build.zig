@@ -90,7 +90,28 @@ pub fn dev(b: *std.Build, tools: type) void {
     // The release tier runs every property under Zig's fuzzer (each shakedown property is a
     // fuzz target: the parsers, translation, compilation and every engine against its oracle)
     // and the suite with safety on.
-    tools.preflight.addCi(b, p, .{ .tests = test_step, .portable_tests = true, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
+    tools.preflight.addCi(b, p, .{
+        .tests = test_step,
+        .portable_tests = true,
+        .hardened = .{ .fuzz_step = "test", .tsan_step = "test" },
+        // The benchmark rows (spectra.md §8): CI compiles them; timings are the running machine's.
+        .bench = .{
+            .programs = &.{.{ .name = "bench", .source = "bench/main.zig" }},
+            .imports = benchImports,
+            .target = target,
+            .optimize = optimize,
+        },
+    });
+}
+
+/// spectra again, in the mode a benchmark builds in: an imported module keeps its own mode, so a
+/// ReleaseFast benchmark over the Debug module would time the Debug module.
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const p = b.dependency("spectra", .{ .target = target, .optimize = optimize }).builder;
+    const module = b.createModule(.{ .root_source_file = p.path("src/spectra.zig"), .target = target, .optimize = optimize });
+    addSourceImports(b, p, module, target, optimize);
+    const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    return b.allocator.dupe(std.Build.Module.Import, &.{ .{ .name = "spectra", .module = module }, .{ .name = "aegis", .module = aegis } }) catch @panic("OOM");
 }
 
 /// regex's own test suite: the files regex 1.13.1 loads, its testdata vendored in testdata/regex.
