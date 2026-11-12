@@ -1091,6 +1091,7 @@ test "Teddy runs on the widest kernel this CPU has, says which, and finds what a
     const kernel = prefilter.teddyKernel();
     // The test log's record of which kernel ran: on an x86-64 runner with AVX2, the AVX2 one.
     std.debug.print("spectra: Teddy kernel on this CPU: {s}\n", .{if (kernel) |k| @tagName(k) else "none"});
+    if (comptime builtin.cpu.arch == .x86_64) cpuReport(ladar.has(.x86_avx2));
     if (comptime builtin.cpu.arch == .x86_64 and ladar.available(.x86_avx2)) {
         if (ladar.has(.x86_avx2)) try testing.expectEqual(prefilter.Kernel.x86_avx2, kernel.?);
     }
@@ -1122,4 +1123,53 @@ test "Teddy runs on the widest kernel this CPU has, says which, and finds what a
     while (try pit.next()) |want| : (n += 1) try testing.expectEqual(want, (try it.next()).?);
     try testing.expectEqual(null, try it.next());
     try testing.expect(n > 100);
+}
+
+/// Beside the kernel, what the CPU and the system say of AVX2, for the test log: CPUID's AVX2 and
+/// AVX bits, OSXSAVE, XCR0's SSE and AVX state bits, and on Linux whether /proc/cpuinfo lists
+/// avx2. A kernel narrower than these allow is ladar's detection to look at.
+fn cpuReport(ladar_avx2: bool) void {
+    const builtin = @import("builtin");
+    const Regs = struct { a: u32, b: u32, c: u32, d: u32 };
+    const cpuid = struct {
+        fn f(leaf: u32, sub: u32) Regs {
+            var a: u32 = undefined;
+            var b: u32 = undefined;
+            var c: u32 = undefined;
+            var d: u32 = undefined;
+            asm volatile ("cpuid"
+                : [a] "={eax}" (a),
+                  [b] "={ebx}" (b),
+                  [c] "={ecx}" (c),
+                  [d] "={edx}" (d),
+                : [leaf] "{eax}" (leaf),
+                  [sub] "{ecx}" (sub),
+            );
+            return .{ .a = a, .b = b, .c = c, .d = d };
+        }
+    }.f;
+    const one = cpuid(1, 0);
+    const seven = cpuid(7, 0);
+    const osxsave = (one.c >> 27) & 1 == 1;
+    var xcr0: u32 = 0;
+    if (osxsave) {
+        var lo: u32 = undefined;
+        var hi: u32 = undefined;
+        asm volatile ("xgetbv"
+            : [lo] "={eax}" (lo),
+              [hi] "={edx}" (hi),
+            : [index] "{ecx}" (@as(u32, 0)),
+        );
+        xcr0 = lo;
+    }
+    var proc: []const u8 = "n/a";
+    if (comptime builtin.os.tag == .linux) {
+        var buffer: [1 << 16]u8 = undefined;
+        if (std.Io.Dir.cwd().readFile(testing.io, "/proc/cpuinfo", &buffer)) |text| {
+            proc = if (std.mem.find(u8, text, " avx2") != null) "avx2" else "no avx2";
+        } else |_| proc = "unreadable";
+    }
+    std.debug.print("spectra: cpu: cpuid.7.ebx.avx2={d} cpuid.1.ecx.avx={d} osxsave={} xcr0=0x{x} /proc/cpuinfo={s} ladar.has(x86_avx2)={}\n", .{
+        (seven.b >> 5) & 1, (one.c >> 28) & 1, osxsave, xcr0, proc, ladar_avx2,
+    });
 }
