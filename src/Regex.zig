@@ -68,6 +68,9 @@ inner: ?Inner,
 stepper: ?lazy.Dfa = null,
 /// Lookaround's oracle (spectra.md §3.1), where the pattern holds a lookaround: null otherwise.
 look: ?Look = null,
+/// The pattern's dialect, which says how a replacement template names groups and how `split`
+/// splits.
+dialect: Syntax.Dialect = .rust,
 
 /// What a pattern with lookaround searches with. `find`, `captures` and `findAll` run the PikeVM
 /// over the main automaton's `check` states, answered by rows stored before it reads a byte
@@ -209,7 +212,7 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         return error.TooLarge;
     }
     const stepper = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .all);
-    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner, .stepper = stepper };
+    return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner, .stepper = stepper, .dialect = options.syntax.dialect };
 }
 
 /// A pattern with lookaround: the main automaton with `check` states, on the PikeVM alone, the
@@ -281,7 +284,7 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
         .row_dfas = row_dfas,
         .match_dfa = match_dfa,
     };
-    var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look };
+    var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look, .dialect = options.syntax.dialect };
     if ((re.cacheBytesChecked() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
@@ -1115,8 +1118,11 @@ fn capturesOf(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
     return true;
 }
 
-/// Every match in turn, leftmost first and apart; an empty match right after the one before is
-/// passed over, so the search always moves on.
+/// Every match in turn, leftmost first and apart, as the pattern's dialect iterates: in Rust's,
+/// regex's rule, an empty match right after the one before passed over; in ECMAScript's, a global
+/// `exec`'s, where the search after an empty match starts one character on and after any other
+/// at its end (so an empty match right after a match counts). Either way the search moves on.
+/// Each search runs over the whole haystack from its start, so assertions see before it.
 ///
 /// Each search is linear, and each starts where the last match ended, so the iteration is linear
 /// where each search stops near its match: over many matches and near misses alike. It is not
@@ -1153,14 +1159,21 @@ pub const Matches = struct {
         try m.prepare();
         if (m.input.span.start > m.input.span.end) return null;
         var found = m.re.findSpan(m.cache, m.input) orelse return null;
-        if (found.start == found.end and m.last_end == found.end) {
+        if (m.re.dialect == .rust and found.start == found.end and m.last_end == found.end) {
             if (m.input.span.start >= m.input.span.end) return null;
             m.input.span.start += 1;
             found = m.re.findSpan(m.cache, m.input) orelse return null;
         }
-        m.input.span.start = found.end;
-        m.last_end = found.end;
+        m.moveOn(found);
         return found;
+    }
+
+    /// Where the next search starts: at the match's end; in ECMAScript one character past an
+    /// empty match (AdvanceStringIndex; in UTF-8 the search passes over the rest of a code
+    /// point's encoding).
+    fn moveOn(m: *Matches, found: Span) void {
+        m.input.span.start = if (m.re.dialect == .ecmascript and found.start == found.end) found.end + 1 else found.end;
+        m.last_end = found.end;
     }
 
     /// The next match as `next` finds it, with each group's span in `out`.
@@ -1169,13 +1182,280 @@ pub const Matches = struct {
         try m.prepare();
         if (m.input.span.start > m.input.span.end) return false;
         if (!m.re.capturesOf(m.cache, m.input, out)) return false;
-        if (out[0].?.start == out[0].?.end and m.last_end == out[0].?.end) {
+        if (m.re.dialect == .rust and out[0].?.start == out[0].?.end and m.last_end == out[0].?.end) {
             if (m.input.span.start >= m.input.span.end) return false;
             m.input.span.start += 1;
             if (!m.re.capturesOf(m.cache, m.input, out)) return false;
         }
-        m.input.span.start = out[0].?.end;
-        m.last_end = out[0].?.end;
+        m.moveOn(out[0].?);
         return true;
+    }
+};
+
+// Replace and split (spectra.md §4.3).
+
+/// What replaces each match: the dialect's template, bytes as they are, or a function.
+pub const Replacement = union(enum) {
+    /// The pattern's dialect's `$` syntax (`expand`): Rust's `Captures::expand`, or ECMA-262's
+    /// GetSubstitution.
+    template: []const u8,
+    /// Written as they are, with no `$` read.
+    literal: []const u8,
+    /// Called at each match with the haystack, the match's groups (group 0 the match) and the
+    /// writer: regex's closure replacer, ECMAScript's replacer function.
+    call: Call,
+
+    pub const Call = struct {
+        context: ?*anyopaque,
+        write: *const fn (context: ?*anyopaque, haystack: []const u8, groups: []const ?Span, writer: *std.Io.Writer) std.Io.Writer.Error!void,
+    };
+};
+
+/// `haystack` written to `writer` with each match replaced as `with` says, and how many were
+/// replaced: every match where `limit` is null, none where it is 0 (unlike regex's `replacen`,
+/// which reads 0 as all), else the first `limit`. Matches come as `findAll` gives them, each
+/// search over the whole haystack from where the last match ended, so a lookbehind and `\b` see
+/// what lies before it. Nothing is allocated: `groups` (`captureCount()` spans, the caller's
+/// contract, checked in every build) holds each match's groups, and the writer is the caller's.
+/// `error.HaystackTooLong` only as `SearchError` says; otherwise only the writer's errors.
+pub fn replace(re: *const Regex, c: *Cache, writer: *std.Io.Writer, haystack: []const u8, with: Replacement, groups: []?Span, limit: ?usize) (SearchError || std.Io.Writer.Error)!usize {
+    aegis.assert.invariant(groups.len == re.nfa.groups, "a group slice holds one span per group");
+    var replaced: usize = 0;
+    var last: usize = 0;
+    var it = re.findAll(c, haystack);
+    while (limit == null or replaced < limit.?) {
+        if (!try it.nextCaptures(groups)) break;
+        const m = groups[0].?;
+        try writer.writeAll(haystack[last..m.start]);
+        switch (with) {
+            .literal => |bytes| try writer.writeAll(bytes),
+            .template => |template| try re.expand(writer, template, haystack, groups),
+            .call => |call| try call.write(call.context, haystack, groups, writer),
+        }
+        last = m.end;
+        replaced += 1;
+    }
+    try writer.writeAll(haystack[last..]);
+    return replaced;
+}
+
+/// `template` expanded for a match whose groups are `groups`, by the pattern's dialect: Rust's
+/// `$n`, `$name`, `${...}` and `$$`, a group that took no part or that the pattern lacks empty;
+/// or ECMA-262's GetSubstitution: `$$`, `$&`, `` $` ``, `$'`, `$n` and `$nn` (two digits where
+/// they name a group, else one), `$<name>` where the pattern names groups; anything else as it
+/// stands.
+pub fn expand(re: *const Regex, writer: *std.Io.Writer, template: []const u8, haystack: []const u8, groups: []const ?Span) std.Io.Writer.Error!void {
+    var i: usize = 0;
+    while (i < template.len) {
+        const dollar = std.mem.indexOfScalarPos(u8, template, i, '$') orelse {
+            try writer.writeAll(template[i..]);
+            return;
+        };
+        try writer.writeAll(template[i..dollar]);
+        i = switch (re.dialect) {
+            .rust => try re.expandRust(writer, template, dollar, haystack, groups),
+            .ecmascript => try re.expandEcma(writer, template, dollar, haystack, groups),
+        };
+    }
+}
+
+fn writeGroup(writer: *std.Io.Writer, haystack: []const u8, groups: []const ?Span, index: usize) std.Io.Writer.Error!void {
+    if (index >= groups.len) return;
+    const span = groups[index] orelse return;
+    try writer.writeAll(haystack[span.start..span.end]);
+}
+
+fn isNameByte(b: u8) bool {
+    return std.ascii.isAlphanumeric(b) or b == '_';
+}
+
+/// Rust's reference at `template[at]` (a `$`): where reading goes on after it.
+fn expandRust(re: *const Regex, writer: *std.Io.Writer, template: []const u8, at: usize, haystack: []const u8, groups: []const ?Span) std.Io.Writer.Error!usize {
+    const rest = template[at + 1 ..];
+    if (rest.len > 0 and rest[0] == '$') {
+        try writer.writeByte('$');
+        return at + 2;
+    }
+    var name: []const u8 = "";
+    var after: usize = at + 1;
+    if (rest.len > 0 and rest[0] == '{') {
+        if (std.mem.indexOfScalar(u8, rest, '}')) |close| {
+            name = rest[1..close];
+            after = at + 1 + close + 1;
+        }
+    } else {
+        var n: usize = 0;
+        while (n < rest.len and isNameByte(rest[n])) n += 1;
+        name = rest[0..n];
+        after = at + 1 + n;
+    }
+    // Nothing that names a group: the `$` as it stands.
+    if (name.len == 0) {
+        try writer.writeByte('$');
+        return at + 1;
+    }
+    if (std.fmt.parseInt(usize, name, 10)) |index| {
+        try writeGroup(writer, haystack, groups, index);
+    } else |_| if (re.captureIndex(name)) |index| try writeGroup(writer, haystack, groups, index);
+    return after;
+}
+
+/// ECMA-262's GetSubstitution for the reference at `template[at]` (a `$`).
+fn expandEcma(re: *const Regex, writer: *std.Io.Writer, template: []const u8, at: usize, haystack: []const u8, groups: []const ?Span) std.Io.Writer.Error!usize {
+    const rest = template[at + 1 ..];
+    const m = groups[0].?;
+    if (rest.len == 0) {
+        try writer.writeByte('$');
+        return at + 1;
+    }
+    switch (rest[0]) {
+        '$' => {
+            try writer.writeByte('$');
+            return at + 2;
+        },
+        '&' => {
+            try writer.writeAll(haystack[m.start..m.end]);
+            return at + 2;
+        },
+        '`' => {
+            try writer.writeAll(haystack[0..m.start]);
+            return at + 2;
+        },
+        '\'' => {
+            try writer.writeAll(haystack[m.end..]);
+            return at + 2;
+        },
+        '0'...'9' => {
+            // Two digits where they name a group, else one; `$0` and a group past the count
+            // are literal.
+            const count = groups.len - 1;
+            var digits: usize = if (rest.len >= 2 and std.ascii.isDigit(rest[1])) 2 else 1;
+            var index = std.fmt.parseInt(usize, rest[0..digits], 10) catch unreachable;
+            if (index > count and digits == 2) {
+                digits = 1;
+                index = rest[0] - '0';
+            }
+            if (index >= 1 and index <= count) {
+                try writeGroup(writer, haystack, groups, index);
+            } else try writer.writeAll(template[at .. at + 1 + digits]);
+            return at + 1 + digits;
+        },
+        '<' => {
+            const named = for (re.nfa.names) |n| {
+                if (n != null) break true;
+            } else false;
+            const close = std.mem.indexOfScalar(u8, rest, '>');
+            if (!named or close == null) {
+                try writer.writeAll("$<");
+                return at + 2;
+            }
+            if (re.captureIndex(rest[1..close.?])) |index| try writeGroup(writer, haystack, groups, index);
+            return at + 1 + close.? + 1;
+        },
+        else => {
+            try writer.writeByte('$');
+            return at + 1;
+        },
+    }
+}
+
+/// A piece of a split: the text between matches, or in the ECMAScript dialect a match's group,
+/// null where it took no part (JavaScript's `undefined`).
+pub const Piece = struct { text: ?[]const u8 };
+
+/// The pieces of `haystack` between matches, by the pattern's dialect: regex's `split`/`splitn`,
+/// or ECMA-262's `String.prototype.split` with each match's groups among the pieces (§4.3).
+/// `limit`: null every piece, 0 none, else at most that many (in Rust the last is the rest of the
+/// haystack). Each search runs over the whole haystack from a position, so a lookbehind and `\b`
+/// see what lies before it. Nothing is allocated; `groups` holds each match's groups.
+pub fn split(re: *const Regex, c: *Cache, haystack: []const u8, groups: []?Span, limit: ?usize) Splits {
+    aegis.assert.invariant(groups.len == re.nfa.groups, "a group slice holds one span per group");
+    return .{ .re = re, .cache = c, .haystack = haystack, .groups = groups, .limit = limit, .matches = re.findAll(c, haystack) };
+}
+
+pub const Splits = struct {
+    re: *const Regex,
+    cache: *Cache,
+    haystack: []const u8,
+    groups: []?Span,
+    limit: ?usize,
+    /// Rust's pieces come between `findAll`'s matches.
+    matches: Matches,
+    yielded: usize = 0,
+    done: bool = false,
+    /// Where the next piece begins (ECMA-262's `p`), and where the next search starts (its `q`).
+    last: usize = 0,
+    from: usize = 0,
+    /// ECMAScript: the next group of the last match to give, 0 for none.
+    pending: usize = 0,
+    started: bool = false,
+
+    /// The next piece. `error.HaystackTooLong` only as `SearchError` says, never otherwise.
+    pub fn next(s: *Splits) SearchError!?Piece {
+        if (s.done) return null;
+        if (s.limit) |l| if (s.yielded >= l) {
+            s.done = true;
+            return null;
+        };
+        const piece = switch (s.re.dialect) {
+            .rust => try s.nextRust(),
+            .ecmascript => try s.nextEcma(),
+        } orelse return null;
+        s.yielded += 1;
+        return piece;
+    }
+
+    fn nextRust(s: *Splits) SearchError!?Piece {
+        const h = s.haystack;
+        // The last piece allowed is the rest of the haystack.
+        if (s.limit) |l| if (s.yielded + 1 == l) {
+            s.done = true;
+            return .{ .text = h[s.last..] };
+        };
+        const m = try s.matches.next() orelse {
+            s.done = true;
+            return .{ .text = h[s.last..] };
+        };
+        const piece = h[s.last..m.start];
+        s.last = m.end;
+        return .{ .text = piece };
+    }
+
+    fn nextEcma(s: *Splits) SearchError!?Piece {
+        const h = s.haystack;
+        if (s.pending != 0) {
+            const i = s.pending;
+            s.pending = if (i + 1 < s.groups.len) i + 1 else 0;
+            return .{ .text = if (s.groups[i]) |g| h[g.start..g.end] else null };
+        }
+        if (!s.started) {
+            s.started = true;
+            // Lookaround's rows once for the haystack, as for every match in turn.
+            try s.re.rows(s.cache, h, .all);
+            // An empty haystack: no pieces where the pattern matches there, else one empty one.
+            if (h.len == 0) {
+                s.done = true;
+                if (s.re.capturesOf(s.cache, .{ .haystack = h, .span = .{ .start = 0, .end = 0 }, .anchored = true }, s.groups)) return null;
+                return .{ .text = h };
+            }
+        }
+        // The first position from `from` where a match starts, before the end, whose end is not
+        // where the last piece began: the specification's `q`, found leftmost-first.
+        while (s.from < h.len) {
+            const found = s.re.capturesOf(s.cache, .{ .haystack = h, .span = .{ .start = s.from, .end = h.len } }, s.groups);
+            if (!found or s.groups[0].?.start >= h.len) break;
+            const m = s.groups[0].?;
+            if (m.end == s.last) {
+                s.from = m.start + 1;
+                continue;
+            }
+            const piece = h[s.last..m.start];
+            s.last = m.end;
+            s.from = m.end;
+            s.pending = if (s.groups.len > 1) 1 else 0;
+            return .{ .text = piece };
+        }
+        s.done = true;
+        return .{ .text = h[s.last..] };
     }
 };

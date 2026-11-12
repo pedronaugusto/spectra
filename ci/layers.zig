@@ -27,7 +27,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
     .{
         .name = "named dependencies",
         .unresolved_only = true,
-        .except_targets = &.{ "std", "aegis", "xenoglyph", "ladar", "kernels_teddy", "kernels_x86_ssse3", "kernels_x86_avx2", "kernels_arm_neon", "shakedown", "strand", "regex_suite", "v8_verdicts", "builtin" },
+        .except_targets = &.{ "std", "aegis", "xenoglyph", "ladar", "kernels_teddy", "kernels_x86_ssse3", "kernels_x86_avx2", "kernels_arm_neon", "shakedown", "strand", "regex_suite", "v8_verdicts", "v8_replace", "builtin" },
     },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };

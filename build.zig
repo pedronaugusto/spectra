@@ -68,6 +68,7 @@ pub fn dev(b: *std.Build, tools: type) void {
             .{ .name = "strand", .module = strand.module("strand") },
             .{ .name = "regex_suite", .module = regexSuite(b, p) },
             .{ .name = "v8_verdicts", .module = embedded(b, p, "testdata/v8/matches.json") },
+            .{ .name = "v8_replace", .module = embedded(b, p, "testdata/v8/replace.json") },
         },
     });
     addSourceImports(b, p, test_module, target, optimize);

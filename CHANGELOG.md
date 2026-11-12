@@ -8,6 +8,10 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Regex.replace` (a `Replacement`: the dialect's `$` template, literal bytes, or a function; `limit` null for all,
+  0 for none, n for the first n; written to the caller's writer) and `Regex.split` (an iterator of `Piece`s by the
+  dialect's rules), allocating nothing; `Regex.expand`. In the ECMAScript dialect `findAll` now iterates as a global
+  `exec` does: an empty match right after a match counts, and after an empty match the search moves on one character.
 - test262's RegExp lookaround cases, transcribed from the 52 files that write a lookaround, with test262's licence
   in LICENSES/test262-BSD.txt.
 - Lookaround in the ECMAScript dialect: lookahead and lookbehind, positive and negative, nested, with any body, by

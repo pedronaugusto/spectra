@@ -179,6 +179,17 @@ kind, or reversed), each row's on a share of `Limits.lazy_dfa` reading the rows 
 lazy DFA, the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
 says whether a pattern is valid whether or not spectra runs it.
 
+## Replace and split
+
+`replace` writes the haystack to the caller's writer with each match (every one where `limit` is null,
+none where it is 0, else the first `limit`) replaced by a `Replacement`: a template in the dialect's
+`$` syntax (regex's `Captures::expand`, or ECMA-262's GetSubstitution), literal bytes, or a function
+given the groups and the writer. `split` iterates the pieces between matches by the dialect's rules
+(regex's `split`/`splitn`; ECMA-262's SplitMatcher, searched leftmost-first so it stays linear, each
+match's groups among the pieces). Matches come as `findAll` gives them, regex's rule in Rust and a
+global `exec`'s in ECMAScript, each search over the whole haystack from a position, so lookbehinds and
+`\b` see before it. Neither allocates: the caller passes the groups and owns the writer.
+
 ## CPU dispatch
 
 Kernels that need more than the target's baseline are chosen at run time from
@@ -217,7 +228,6 @@ and Aho-Corasick need only the baseline.
 
 ## Not built yet
 
-Lookaround on the lazy DFAs, leftmost-longest matching,
-replacement and split, the dense DFA (`Limits.dense_dfa` is reserved for it) and the build step that
+Leftmost-longest matching, the dense DFA (`Limits.dense_dfa` is reserved for it) and the build step that
 writes dense DFAs as a Zig module. Until then each is absent, and a pattern that needs one is refused
 by name.

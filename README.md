@@ -85,7 +85,9 @@ std.debug.assert(d.span.start == 3 and d.span.end == 5);
   (ECMA-262 2025: `u`, `v` with class set operations and `\q{}`, `i`, `m`, `s`, modifiers, named groups; Annex B's
   grammar without `u` or `v`). `ecmascript.validate` says whether a pattern is valid ECMA-262 whatever spectra runs.
 - **Matching.** Leftmost-first, as Rust's `regex` and backtracking engines report it: is-match, find, captures and
-  every match in turn, over a span of the haystack with assertions seeing the whole of it, anchored or not. Sets of
+  every match in turn, replace (a template in the dialect's `$` syntax, literal bytes, or a function, written to a
+  writer) and split (by each dialect's rules), over a span of the haystack with assertions seeing the whole of it,
+  anchored or not. Sets of
   patterns searched in one pass (`Set`), and a stepping automaton for walking a trie or a path (`Automaton`).
 - **Lookaround** in the ECMAScript dialect: lookahead and lookbehind, positive and negative, nested, with any body,
   in linear time by the method of Barrière and Pit-Claudel ("Linear Matching of JavaScript Regular Expressions", PLDI
@@ -107,8 +109,7 @@ std.debug.assert(d.span.start == 3 and d.span.end == 5);
   leftmost-first engine; `Regex.findAll`'s documentation shows the case. Memory is fixed at compile by `Limits`.
 - **Differences from V8** in the ECMAScript dialect: three cases of V8's verdicts where V8 reads UTF-16 code units
   and spectra reads code points.
-- **Not yet.** Dense DFAs built ahead, compiling patterns to tables at build time, leftmost-longest matching,
-  replacement and split.
+- **Not yet.** Dense DFAs built ahead, compiling patterns to tables at build time, leftmost-longest matching.
 
 ## Stability
 
