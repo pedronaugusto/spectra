@@ -140,7 +140,8 @@ default engines, each path counted; V8's verdicts on 9,480 ECMAScript cases (`te
 over the HIR. A bounded backtracker over the automaton is the oracle for random patterns and haystacks in both
 dialects: the PikeVM, the lazy DFAs forward and reversed, the bounded backtracker, the one-pass DFA, every prefilter
 and every strategy are checked against it or against the PikeVM. The linear bound is counted, not timed, on the
-shapes that make backtracking exponential. Every property runs seeded in `bay test`, and under `bay test --fuzz`
+shapes that make backtracking exponential. test262's RegExp lookaround cases (every file that writes a
+lookaround) are transcribed with their expected answers, and V8's verdicts include lookaround patterns. Every property runs seeded in `bay test`, and under `bay test --fuzz`
 Zig's fuzzer searches further; the release tier's `bay hardened-fuzz` runs them under the fuzzer with safety on.
 
 ## License
@@ -149,3 +150,5 @@ MIT.
 
 src/hir/suffix.zig and src/hir/inner.zig include code translated from the Rust regex project (MIT OR Apache-2.0); see
 LICENSES/.
+src/test262_test.zig transcribes test cases from test262, the ECMAScript test suite (BSD-3-Clause); its licence is
+LICENSES/test262-BSD.txt.

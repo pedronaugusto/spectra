@@ -202,7 +202,10 @@ and Aho-Corasick need only the baseline.
   regex runs it (is-match, every match, every match's captures), each test with the lazy DFA and again
   without it; what spectra does not offer (sets, overlapping and earliest searches, leftmost-longest,
   other line terminators) is passed over and counted by reason.
-- **V8's verdicts**: ECMAScript patterns run under Node (`testdata/v8`), compared span for span.
+- **V8's verdicts**: ECMAScript patterns run under Node (`testdata/v8`), compared span for span,
+  lookaround patterns among them.
+- **test262**: every RegExp test file that writes a lookaround (52), its assertions' expected answers
+  transcribed (`src/test262_test.zig`), backreferences refused by name and early errors invalid.
 - **Oracles**: a bounded backtracker over the automaton (`testing/backtrack.zig`) and ECMA-262's
   matcher semantics written as the specification writes them (`testing/ecma.zig`), against which every
   engine and strategy is checked on random patterns and haystacks.

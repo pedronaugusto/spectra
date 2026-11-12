@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- test262's RegExp lookaround cases, transcribed from the 52 files that write a lookaround, with test262's licence
+  in LICENSES/test262-BSD.txt.
 - Lookaround in the ECMAScript dialect: lookahead and lookbehind, positive and negative, nested, with any body, by
   Barrière and Pit-Claudel's oracle method. Each lookaround's row (its truth at every position) is built by a scan
   that writes every match, innermost first, or streamed beside the scan that queries it where that scan reads its
