@@ -94,6 +94,9 @@ pub const PlanOptions = struct {
     /// The way the main expression's scan reads, which streams the lookarounds it queries
     /// directly that read the same way; null stores them all (no main scan streams).
     main: ?Scan = null,
+    /// Every row stored, nested ones too: for the runs that rebuild a lookaround's groups,
+    /// which read the rows of the lookarounds inside it at any position.
+    store_all: bool = false,
 };
 
 /// Each lookaround's automaton, from the pattern's HIR, and which rows are stored. Each automaton
@@ -163,7 +166,7 @@ pub fn plan(gpa: Allocator, hir: *const Hir, options: PlanOptions, diagnostic: ?
     var stored: u32 = 0;
     for (rows) |*r| {
         const querying: ?Scan = if (r.parent) |up| rows[up].scan else options.main;
-        if (querying != r.scan) {
+        if (options.store_all or querying != r.scan) {
             r.slot = stored;
             stored += 1;
         }

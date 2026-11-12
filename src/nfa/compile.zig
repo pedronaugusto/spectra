@@ -70,6 +70,13 @@ pub const Options = struct {
     strings: bool = false,
     /// A lookaround is a `check` state answered by the oracle; without it, refused.
     lookaround: bool = false,
+    /// ECMA-262's backward direction, for a lookbehind's body whose groups are rebuilt: read
+    /// back from where it ends, as `reverse` reads, but with the groups and the ECMAScript
+    /// repetitions kept, since which way of matching comes first decides them; a group's range
+    /// runs from where the reading leaves it back to where it entered.
+    backward: bool = false,
+    /// A lookaround's body alone: no group 0 around it, anchored where its run starts.
+    body: bool = false,
 };
 
 /// The automaton of `hir`, owned by the caller (`Nfa.deinit`).
@@ -86,7 +93,20 @@ pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnos
     var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
     defer spent.* = limit - charged.left;
     // Reversed, only the strings count: Rust's repetitions match the same ones (the file's doc).
-    var c: Compiler = .{ .scratch = scratch.allocator(), .b = .{ .gpa = charged.allocator() }, .hir = hir, .repeats = .{ .ecma = options.ecma and !options.reverse and !options.strings }, .reverse = options.reverse, .captures = !options.reverse and !options.strings, .lookaround = options.lookaround, .reverse_unanchored = options.reverse_unanchored };
+    const reverse = options.reverse or options.backward;
+    const priority = !options.reverse or options.backward;
+    var c: Compiler = .{
+        .scratch = scratch.allocator(),
+        .b = .{ .gpa = charged.allocator() },
+        .hir = hir,
+        .repeats = .{ .ecma = options.ecma and priority and !options.strings },
+        .reverse = reverse,
+        .captures = priority and !options.strings,
+        .lookaround = options.lookaround,
+        .reverse_unanchored = options.reverse_unanchored,
+        .backward = options.backward,
+        .body = options.body or reverse,
+    };
     const starts = c.run() catch |err| switch (err) {
         error.OutOfMemory => if (charged.over)
             return refuse(diagnostic, options.span, .nfa_too_large, error.TooLarge)
@@ -178,7 +198,7 @@ const BState = union(enum) {
     clear: struct { first: u32, end: u32, next: u32 },
     loop_begin: u32,
     loop_end: u32,
-    check: struct { row: u32, negated: bool, next: u32 },
+    check: struct { row: u32, negated: bool, slot: u32, next: u32 },
     fail,
     match: u32,
 };
@@ -277,6 +297,10 @@ const Compiler = struct {
     lookaround: bool = false,
     /// Reversed, whether a lazy `.*?` comes before the reversed pattern.
     reverse_unanchored: bool = false,
+    /// ECMA-262's backward direction: a group's start slot written where its reading ends.
+    backward: bool = false,
+    /// No group 0: the pattern alone, ending in its match.
+    body: bool = false,
     props: []Prop = &.{},
     frames: std.ArrayList(Frame) = .empty,
     utf8_nodes: [5]Utf8Node = @splat(.{}),
@@ -289,8 +313,8 @@ const Compiler = struct {
 
     fn run(c: *Compiler) BuildError!Starts {
         try c.properties();
-        if (c.reverse) {
-            // Anchored at the match's end, where the reverse search starts; no captures.
+        if (c.body) {
+            // Anchored where its run starts: a match's end reversed, or a lookaround's position.
             const body = try c.walk(c.hir.root);
             const m = try c.b.add(.{ .match = 0 });
             c.b.patch(body.end, m);
@@ -444,7 +468,10 @@ const Compiler = struct {
                 },
                 .lookaround => |la| {
                     if (!c.lookaround) return error.Unsupported;
-                    const id = try c.b.add(.{ .check = .{ .row = la.index, .negated = la.negated, .next = unset } });
+                    // A positive lookaround's groups are rebuilt from the last place it was taken.
+                    const groups = c.props[@backingInt(la.sub)].groups;
+                    const slot = if (c.captures and !la.negated and groups != null) std.math.mul(u32, groups.?[0], 2) catch return error.TooLarge else Nfa.no_slot;
+                    const id = try c.b.add(.{ .check = .{ .row = la.index, .negated = la.negated, .slot = slot, .next = unset } });
                     return .{ .start = id, .end = id };
                 },
             }
@@ -458,13 +485,16 @@ const Compiler = struct {
         switch (c.hir.node(f.node)) {
             .capture => |cap| {
                 const slot = std.math.mul(u32, cap.index, 2) catch return error.TooLarge;
+                // Backward, the group is entered at its end and left at its start.
+                const opening = if (c.backward) slot + 1 else slot;
+                const closing = if (c.backward) slot else slot + 1;
                 if (got) |inner| {
-                    const end = try c.b.add(.{ .capture = .{ .group = cap.index, .slot = slot + 1, .next = unset } });
+                    const end = try c.b.add(.{ .capture = .{ .group = cap.index, .slot = closing, .next = unset } });
                     c.b.patch(f.acc.start, inner.start);
                     c.b.patch(inner.end, end);
                     return .{ .finished = .{ .start = f.acc.start, .end = end } };
                 }
-                f.acc.start = try c.b.add(.{ .capture = .{ .group = cap.index, .slot = slot, .next = unset } });
+                f.acc.start = try c.b.add(.{ .capture = .{ .group = cap.index, .slot = opening, .next = unset } });
                 return .{ .descend = cap.sub };
             },
             .concat => |slice| {
@@ -843,7 +873,7 @@ const Builder = struct {
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = move.id(cl.next) } },
                 .loop_begin => |next| .{ .loop_begin = move.id(next) },
                 .loop_end => |next| .{ .loop_end = move.id(next) },
-                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .next = move.id(k.next) } },
+                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .slot = k.slot, .next = move.id(k.next) } },
                 .sparse => |slice| blk: {
                     try room(b.trans.items.len, slice.len);
                     const start: u32 = @intCast(b.trans.items.len);
@@ -961,7 +991,7 @@ const Builder = struct {
                 .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = map.id(cl.next) } },
                 .loop_begin => |next| .{ .loop_begin = map.id(next) },
                 .loop_end => |next| .{ .loop_end = map.id(next) },
-                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .next = map.id(k.next) } },
+                .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .slot = k.slot, .next = map.id(k.next) } },
                 .fail => .fail,
                 .match => |p| .{ .match = p },
             };

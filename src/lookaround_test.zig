@@ -95,10 +95,29 @@ test "a haystack whose rows pass Limits.oracle is refused by name, before a byte
     try testing.expect(!try re.isMatch(&c, &long));
 }
 
-test "groups inside a positive lookaround wait for their captures; a negative one's never take part" {
+fn expectGroups(pattern: []const u8, haystack: []const u8, want: []const ?Regex.Span) !void {
+    errdefer std.debug.print("/{s}/ on {s}\n", .{ pattern, haystack });
+    var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma });
+    defer re.deinit();
+    var c = try re.cache(gpa);
+    defer c.deinit(gpa);
+    const groups = try gpa.alloc(?Regex.Span, re.captureCount());
+    defer gpa.free(groups);
+    try testing.expect(try re.captures(&c, .of(haystack), groups));
+    try testing.expectEqualSlices(?Regex.Span, want, groups);
+}
+
+test "a positive lookaround's groups are its first success's, read its way; a negative one's never take part" {
+    // /(?=(a+))/.exec("baaabac"): "" at 1, its group the lookahead's greedy first success.
+    try expectGroups("(?=(a+))", "baaabac", &.{ span(1, 1), span(1, 4) });
+    // Lookbehind reads backward: the second group, read first, takes as much as it can.
+    try expectGroups("(?<=(\\d+)(\\d+))$", "1053", &.{ span(4, 4), span(0, 1), span(1, 4) });
+    try expectGroups("(?<=\\$(\\d+)\\.)\\d+", "cost $10.99", &.{ span(9, 11), span(6, 8) });
+    // Nested both ways: the inner groups rebuilt from the outer run.
+    try expectGroups("(?=(a)(?<=(a)))a", "a", &.{ span(0, 1), span(0, 1), span(0, 1) });
+    // Inside a quantifier, the last taking defines them; an iteration clears them first.
+    try expectGroups("(?:(?=(\\w))\\w)+", "abc", &.{ span(0, 3), span(2, 3) });
     var d: Regex.Diagnostic = .{};
-    try testing.expectError(error.Unsupported, Regex.compile(gpa, .init("(?=(a))a"), .{ .syntax = ecma, .diagnostic = &d }));
-    try testing.expectEqual(.unsupported_lookaround, d.reason);
     var re = try Regex.compile(gpa, .init("(?!(a))(\\w)"), .{ .syntax = ecma });
     defer re.deinit();
     var c = try re.cache(gpa);
@@ -118,7 +137,7 @@ test "groups inside a positive lookaround wait for their captures; a negative on
 
 // Every search against ECMA-262's matcher.
 
-var reached: struct { patterns: usize = 0, matched: usize = 0, groups: usize = 0, refused_groups: usize = 0, scans_storing: usize = 0, budget: usize = 0 } = .{};
+var reached: struct { patterns: usize = 0, matched: usize = 0, groups: usize = 0, inside: usize = 0, scans_storing: usize = 0, budget: usize = 0 } = .{};
 
 fn anySearch(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -133,13 +152,12 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     if (hir.lookarounds == 0) return;
     var d: Regex.Diagnostic = .{};
     var re = Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .diagnostic = &d }) catch |err| switch (err) {
-        error.Unsupported => {
-            try testing.expectEqual(.unsupported_lookaround, d.reason);
-            reached.refused_groups += 1;
-            return;
-        },
         error.TooLarge => return,
         else => return err,
+    };
+    if (re.look.?.bodies.len > 0) for (re.look.?.bodies) |b| if (b != null) {
+        reached.inside += 1;
+        break;
     };
     defer re.deinit();
     var c = try re.cache(case.gpa);
@@ -178,5 +196,5 @@ test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matche
     try shakedown.check(gpa, {}, anySearch, .{ .cases = 4000, .seed = 0x10a4 });
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
-    try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.refused_groups > 100 and reached.scans_storing > 100);
+    try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.inside > 200 and reached.scans_storing > 100);
 }

@@ -144,9 +144,8 @@ strategies never rescan.
 ## Refused by name
 
 What cannot be searched in linear time, or is not built yet, is refused at compile with
-`error.Unsupported`, a reason and the construct's span: backreferences, a capture group inside a positive
-lookaround (until its captures are rebuilt), a lookaround in a `Set`, and the ECMAScript forms spectra
-does not run.
+`error.Unsupported`, a reason and the construct's span: backreferences, a lookaround in a `Set`, and
+the ECMAScript forms spectra does not run.
 
 ## Lookaround
 
@@ -161,8 +160,12 @@ lockstep with that scan; one read the other way is **stored**, built first, inne
 automaton; `isMatch` scans the strings-only main expression the way that streams most of its
 lookarounds (all of zod's patterns read backward and store nothing). Stored rows take a bit per
 position each, within `Limits.oracle`; a haystack past it is refused before a byte is read
-(`error.HaystackTooLong`, `Regex.longestHaystack`). The lazy DFAs, the backtracker, the one-pass DFA
-and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
+(`error.HaystackTooLong`, `Regex.longestHaystack`). A positive lookaround's groups are rebuilt after
+the match: the main automaton writes the last position the path took each one at into its first
+group's start slot (cleared with the enclosing quantifier's groups, as ECMA-262 clears them), and one
+anchored run of its body, read its way (a lookbehind's compiled in ECMA-262's backward direction),
+gives its first success's groups; an outer lookaround's run sets its inner ones'. The lazy DFAs, the
+backtracker, the one-pass DFA and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
 says whether a pattern is valid whether or not spectra runs it.
 
 ## CPU dispatch
@@ -200,7 +203,7 @@ and Aho-Corasick need only the baseline.
 
 ## Not built yet
 
-Captures inside positive lookarounds, lookaround on the lazy DFAs, leftmost-longest matching,
+Lookaround on the lazy DFAs, leftmost-longest matching,
 replacement and split, the dense DFA (`Limits.dense_dfa` is reserved for it) and the build step that
 writes dense DFAs as a Zig module. Until then each is absent, and a pattern that needs one is refused
 by name.

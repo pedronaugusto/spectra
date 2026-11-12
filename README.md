@@ -92,8 +92,8 @@ std.debug.assert(d.span.start == 3 and d.span.end == 5);
   2024): each lookaround's truth at every position is built before the search reads it, or computed beside it where
   the scan reads the haystack the lookaround's way. Rows that must be stored take a bit per position each, bounded by
   `Limits.oracle`: a longer haystack is refused by name (`error.HaystackTooLong`, said up front by
-  `Regex.longestHaystack`), never searched slowly. For now a capture group inside a positive lookaround is refused,
-  and such patterns run on the PikeVM.
+  `Regex.longestHaystack`), never searched slowly. Groups inside a positive lookaround are its first success's, as
+  ECMA-262 says (a lookbehind's read backward). For now such patterns run on the PikeVM.
 - **Refused by name.** Backreferences (not regular); in the ECMAScript dialect without `u` or `v`, half of a code
   point past U+FFFF named alone (spectra reads UTF-8, not UTF-16 code units); `v`'s properties of strings. Every
   limit (`Limits`: pattern length, nesting, repetition counts, automaton size, cache size) refuses past it, before

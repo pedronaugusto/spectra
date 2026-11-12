@@ -82,11 +82,19 @@ const Look = struct {
     match_scan: oracle.Scan,
     /// `Limits.oracle`: each store's capacity, where its plan stores rows.
     capacity: usize,
+    /// For each positive lookaround holding groups, by number, the automaton of its body with
+    /// its groups, read its way (`backward` for a lookbehind): what rebuilds its groups from the
+    /// position the main match last took it at. Null for the others.
+    bodies: []?Body,
+
+    const Body = struct { nfa: Nfa, scan: oracle.Scan, slot: u32, groups: [2]u32 };
 
     fn deinit(l: *Look, gpa: Allocator) void {
         l.search.deinit(gpa);
         l.match.deinit(gpa);
         l.match_nfa.deinit(gpa);
+        for (l.bodies) |*b| if (b.*) |*body| body.nfa.deinit(gpa);
+        gpa.free(l.bodies);
     }
 
     fn searchCapacity(l: *const Look) usize {
@@ -174,20 +182,22 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner, .stepper = stepper };
 }
 
-/// A pattern with lookaround: the main automaton with `check` states, on the PikeVM alone, and
-/// the oracle's plans (`Look`). A group inside a positive lookaround is refused until its
-/// captures are rebuilt (a negative lookaround's groups never take part, as ECMA-262 says).
+/// A pattern with lookaround: the main automaton with `check` states, on the PikeVM alone, the
+/// oracle's plans, and each positive lookaround's body with its groups (`Look`).
 fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options: Options, whole: Ast.Span) CompileError!Regex {
-    if (try groupInPositiveLookaround(arena, hir)) {
-        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .unsupported_lookaround };
-        return error.Unsupported;
-    }
     const ecma = options.syntax.dialect == .ecmascript;
     var nfa = try compile_mod.compile(gpa, hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole, .ecma = ecma, .lookaround = true }, options.diagnostic);
     errdefer nfa.deinit(gpa);
     const plan_options: oracle.PlanOptions = .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole };
-    var search = try oracle.plan(gpa, hir, plan_options, options.diagnostic);
+    var search_options = plan_options;
+    search_options.store_all = true;
+    var search = try oracle.plan(gpa, hir, search_options, options.diagnostic);
     errdefer search.deinit(gpa);
+    const bodies = try bodiesOf(gpa, arena, hir, options, whole);
+    errdefer {
+        for (bodies) |*b| if (b.*) |*body| body.nfa.deinit(gpa);
+        gpa.free(bodies);
+    }
     // `isMatch` reads the way most of the lookarounds the main expression queries read, so they
     // stream: all lookaheads, as zod's patterns are, read backward and store nothing.
     var ahead: usize = 0;
@@ -203,7 +213,7 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
     errdefer match.deinit(gpa);
     var match_nfa = try compile_mod.compile(gpa, hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole, .strings = true, .lookaround = true, .reverse = scan == .backward, .reverse_unanchored = scan == .backward }, options.diagnostic);
     errdefer match_nfa.deinit(gpa);
-    const look: Look = .{ .search = search, .match = match, .match_nfa = match_nfa, .match_scan = scan, .capacity = options.limits.oracle.raw() };
+    const look: Look = .{ .search = search, .match = match, .match_nfa = match_nfa, .match_scan = scan, .capacity = options.limits.oracle.raw(), .bodies = bodies };
     var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look };
     if ((re.cacheBytesChecked() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
@@ -212,30 +222,62 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
     return re;
 }
 
-/// Whether a capture group lies inside a positive lookaround. Nodes come children first, so a
-/// pass from the last node down sees each parent before its children and carries whether a node
-/// lies inside one.
-fn groupInPositiveLookaround(arena: Allocator, hir: *const Hir) Allocator.Error!bool {
-    const inside = try arena.alloc(bool, hir.nodes.len);
-    @memset(inside, false);
-    var i = hir.nodes.len;
-    while (i > 0) {
-        i -= 1;
-        const here = inside[i];
-        switch (hir.nodes[i]) {
-            .capture => |cap| {
-                if (here) return true;
-                inside[@backingInt(cap.sub)] = here;
-            },
-            .lookaround => |la| inside[@backingInt(la.sub)] = here or !la.negated,
-            .repetition => |r| inside[@backingInt(r.sub)] = here,
-            .concat, .alternation => |slice| for (hir.childrenOf(slice)) |child| {
-                inside[@backingInt(child)] = here;
-            },
-            else => {},
-        }
+/// Each positive lookaround holding groups, by number: its body's automaton with its groups,
+/// read its way, and the slots its groups take (`Look.Body`).
+fn bodiesOf(gpa: Allocator, arena: Allocator, hir: *const Hir, options: Options, whole: Ast.Span) CompileError![]?Look.Body {
+    const bodies = try gpa.alloc(?Look.Body, hir.lookarounds);
+    @memset(bodies, null);
+    errdefer {
+        for (bodies) |*b| if (b.*) |*body| body.nfa.deinit(gpa);
+        gpa.free(bodies);
     }
-    return false;
+    const groups = try groupsUnder(arena, hir);
+    for (hir.nodes) |node| switch (node) {
+        .lookaround => |la| {
+            if (la.negated) continue;
+            const range = groups[@backingInt(la.sub)] orelse continue;
+            var body = hir.*;
+            body.root = la.sub;
+            const scan: oracle.Scan = if (la.kind == .ahead) .forward else .backward;
+            const nfa = try compile_mod.compile(gpa, &body, .{
+                .limits = options.limits,
+                .utf8 = options.syntax.utf8,
+                .span = whole,
+                .ecma = options.syntax.dialect == .ecmascript,
+                .lookaround = true,
+                .body = true,
+                .backward = scan == .backward,
+            }, options.diagnostic);
+            bodies[la.index] = .{ .nfa = nfa, .scan = scan, .slot = range[0] * 2, .groups = range };
+        },
+        else => {},
+    };
+    return bodies;
+}
+
+/// The lowest and highest group under each node: nodes come children first, so one pass up.
+fn groupsUnder(arena: Allocator, hir: *const Hir) Allocator.Error![]?[2]u32 {
+    const out = try arena.alloc(?[2]u32, hir.nodes.len);
+    for (hir.nodes, out) |node, *o| {
+        o.* = switch (node) {
+            .capture => |cap| join(out[@backingInt(cap.sub)], .{ cap.index, cap.index }),
+            .repetition => |r| out[@backingInt(r.sub)],
+            .lookaround => |la| out[@backingInt(la.sub)],
+            .concat, .alternation => |slice| blk: {
+                var acc: ?[2]u32 = null;
+                for (hir.childrenOf(slice)) |child| acc = join(acc, out[@backingInt(child)]);
+                break :blk acc;
+            },
+            else => null,
+        };
+    }
+    return out;
+}
+
+fn join(a: ?[2]u32, b: ?[2]u32) ?[2]u32 {
+    const x = a orelse return b;
+    const y = b orelse return a;
+    return .{ @min(x[0], y[0]), @max(x[1], y[1]) };
 }
 
 /// The split of `hir`'s top concatenation P·X at the first child after the first whose
@@ -351,7 +393,10 @@ pub fn cacheBytes(re: *const Regex) usize {
 fn cacheBytesChecked(re: *const Regex) ?usize {
     const engines_bytes = cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker, if (re.inner) |*i| &i.dfa else null) orelse return null;
     const l = if (re.look) |*l| l else return engines_bytes;
-    const stores = oracle.Cache.bytes(&l.search, null, l.searchCapacity()) + oracle.Cache.bytes(&l.match, &l.match_nfa, l.matchCapacity());
+    var stores = oracle.Cache.bytes(&l.search, null, l.searchCapacity()) + oracle.Cache.bytes(&l.match, &l.match_nfa, l.matchCapacity());
+    for (l.bodies) |b| if (b) |body| {
+        stores = std.math.add(usize, stores, pikevm.sizes(&body.nfa).bytes() orelse return null) catch return null;
+    };
     return std.math.add(usize, engines_bytes, stores) catch null;
 }
 
@@ -412,6 +457,8 @@ pub const Cache = struct {
     /// Lookaround's stores: the rows `find`, `captures` and `findAll` read, and `isMatch`'s.
     look_search: ?oracle.Cache = null,
     look_match: ?oracle.Cache = null,
+    /// A PikeVM's store for each lookaround body whose groups are rebuilt, by number.
+    look_bodies: []?pikevm.Cache = &.{},
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
     last_start: Start = .pikevm,
@@ -479,6 +526,8 @@ pub const Cache = struct {
         if (c.inner) |*i| i.deinit(gpa);
         if (c.look_search) |*l| l.deinit(gpa);
         if (c.look_match) |*l| l.deinit(gpa);
+        for (c.look_bodies) |*b| if (b.*) |*body| body.deinit(gpa);
+        if (c.look_bodies.len > 0) gpa.free(c.look_bodies);
     }
 };
 
@@ -495,8 +544,21 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
     errdefer if (inner) |*i| i.deinit(gpa);
     var look_search: ?oracle.Cache = if (re.look) |*l| try .init(gpa, &l.search, null, l.searchCapacity()) else null;
     errdefer if (look_search) |*l| l.deinit(gpa);
-    const look_match: ?oracle.Cache = if (re.look) |*l| try .init(gpa, &l.match, &l.match_nfa, l.matchCapacity()) else null;
-    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = inner, .look_search = look_search, .look_match = look_match };
+    var look_match: ?oracle.Cache = if (re.look) |*l| try .init(gpa, &l.match, &l.match_nfa, l.matchCapacity()) else null;
+    errdefer if (look_match) |*l| l.deinit(gpa);
+    var look_bodies: []?pikevm.Cache = &.{};
+    if (re.look) |*l| {
+        look_bodies = try gpa.alloc(?pikevm.Cache, l.bodies.len);
+        @memset(look_bodies, null);
+        errdefer {
+            for (look_bodies) |*b| if (b.*) |*body| body.deinit(gpa);
+            gpa.free(look_bodies);
+        }
+        for (l.bodies, look_bodies) |b, *out| if (b) |body| {
+            out.* = try .init(gpa, &body.nfa);
+        };
+    }
+    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = inner, .look_search = look_search, .look_match = look_match, .look_bodies = look_bodies };
 }
 
 /// What the PikeVM searches: the input cut at the match's end where the lazy DFA found one, null
@@ -685,6 +747,33 @@ pub fn find(re: *const Regex, c: *Cache, input: Input) SearchError!?Span {
     return re.findSpan(c, input);
 }
 
+/// The groups inside positive lookarounds (spectra.md §3.1, phase 3; PLDI 2024 §4.3.3): for each
+/// that the match took, from the last position it took it at (its slot), one anchored run of its
+/// body, read its way, whose preferred match is ECMA-262's first success, its groups copied in.
+/// Only that last taking can define them: each earlier one lay in an earlier iteration of an
+/// enclosing quantifier, whose next iteration cleared them (Capture Reset). Lookarounds come in
+/// preorder, so an outer one's run sets the slot of each inner one it took before that one is
+/// reached; each runs at most once, so the work is O(|r|·n).
+fn rebuild(re: *const Regex, c: *Cache, haystack: []const u8, slots: []?usize) void {
+    const l = &re.look.?;
+    for (l.bodies, c.look_bodies) |maybe, *cache_slot| {
+        const body = maybe orelse continue;
+        const at = slots[body.slot] orelse continue;
+        const bc = &cache_slot.*.?;
+        bc.rows = c.pike.rows;
+        const scratch = bc.slots;
+        @memset(scratch, null);
+        const ended = switch (body.scan) {
+            .forward => pikevm.search(&body.nfa, bc, .{ .haystack = haystack, .span = .{ .start = at, .end = haystack.len }, .anchored = true }, scratch),
+            .backward => pikevm.searchBackward(&body.nfa, bc, .{ .haystack = haystack, .span = .{ .start = 0, .end = at } }, scratch),
+        };
+        aegis.assert.invariant(ended != null, "a lookaround the match took holds where it took it");
+        const lo = body.groups[0] * 2;
+        const hi = body.groups[1] * 2 + 2;
+        @memcpy(slots[lo..hi], scratch[lo..hi]);
+    }
+}
+
 /// Lookaround's stored rows over `haystack`, before a search of a pattern with lookaround reads
 /// a byte; nothing to do for any other.
 fn rows(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!void {
@@ -751,6 +840,7 @@ fn capturesOf(re: *const Regex, c: *Cache, input: Input, out: []?Span) bool {
         return false;
     };
     if (located == .span) aegis.assert.invariant(end == located.span.end and slots[0].? == located.span.start, "the match found again is the one the lazy DFAs found");
+    if (re.look != null) re.rebuild(c, input.haystack, slots);
     for (out, 0..) |*span, g| {
         span.* = if (slots[2 * g]) |start| .{ .start = start, .end = slots[2 * g + 1].? } else null;
     }

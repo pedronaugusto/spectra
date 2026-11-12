@@ -12,6 +12,9 @@ const Allocator = std.mem.Allocator;
 const Hir = @import("../hir/Hir.zig");
 
 pub const StateId = aegis.handle.Index(Nfa, u32);
+
+/// A `check` state that writes no slot.
+pub const no_slot = std.math.maxInt(u32);
 pub const Look = Hir.Look;
 pub const LookSet = std.EnumSet(Look);
 
@@ -85,8 +88,10 @@ pub const State = union(enum) {
     loop_end: StateId,
     /// Lookaround `row` (its number) holds where the search is, or with `negated` does not:
     /// then `next`. Answered by the oracle (oracle.zig), which builds each row before a scan reads
-    /// it.
-    check: struct { row: u32, negated: bool, next: StateId },
+    /// it. A positive lookaround holding groups writes the position into `slot` (its first
+    /// group's start, which nothing else in this automaton writes): the last place the path took
+    /// it, from which its groups are rebuilt. `no_slot` otherwise.
+    check: struct { row: u32, negated: bool, slot: u32, next: StateId },
     /// Matches nothing: an empty class.
     fail,
     /// A match of pattern `match`: always 0 but in a set's automaton, which holds one match

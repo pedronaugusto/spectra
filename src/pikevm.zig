@@ -245,6 +245,61 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
     return found;
 }
 
+/// Reading backward from `input.span.end`, anchored there, down to no further than its start:
+/// the preferred match, in ECMA-262's backward direction (a lookbehind's body, compiled
+/// `backward`), with as many slots as `slots` holds written; where it ends, which is its left
+/// end. Each thread is entered at most once per position, as forward.
+pub fn searchBackward(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?usize {
+    aegis.assert.invariant(cache.states == nfa.states.len, "a cache searches the automaton it was made for");
+    aegis.assert.invariant(slots.len <= nfa.slots(), "a search writes the slots the automaton has");
+    aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
+    cache.visited = 0;
+    const stride = slots.len;
+    var curr = &cache.curr;
+    var next = &cache.next;
+    curr.set.len = 0;
+    next.set.len = 0;
+    var found: ?usize = null;
+    var at = input.span.end;
+    closure(nfa, cache, curr, next.absent(stride), input.haystack, at, nfa.start_anchored, true);
+    while (true) {
+        if (curr.set.len == 0) break;
+        for (curr.set.items()) |key| {
+            cache.visited += 1;
+            const id = stateOf(nfa, key);
+            const target: ?Nfa.StateId = switch (nfa.state(id)) {
+                .byte_range => |t| if (at > input.span.start and t.contains(input.haystack[at - 1])) t.next else null,
+                .sparse => |slice| blk: {
+                    if (at <= input.span.start) break :blk null;
+                    const byte = input.haystack[at - 1];
+                    for (nfa.transitionsOf(slice)) |t| {
+                        if (byte < t.lo) break :blk null;
+                        if (byte <= t.hi) break :blk t.next;
+                    }
+                    break :blk null;
+                },
+                .match => {
+                    @memcpy(slots, curr.row(stride, key));
+                    // The first thread at the match wins, and those after it are dropped.
+                    found = at;
+                    break;
+                },
+                else => null,
+            };
+            if (target) |t| closure(nfa, cache, next, curr.row(stride, key), input.haystack, at - 1, t, true);
+        }
+        if (at == input.span.start) break;
+        at -= 1;
+        std.mem.swap(*Active, &curr, &next);
+        next.set.len = 0;
+    }
+    if (std.debug.runtime_safety) {
+        const positions = input.span.end - input.span.start + 1;
+        aegis.assert.invariant(cache.visited <= 2 * nfa.states.len * lanes(nfa) * positions, "a search enters each thread at most once per position and step");
+    }
+    return found;
+}
+
 /// Steps every thread over the byte at `at`, in order, into `next`: the first to reach the
 /// match state wins, and every thread after it is dropped.
 fn nexts(nfa: *const Nfa, cache: *Cache, curr: *Active, next: *Active, input: Input, at: usize, slots: []?usize) bool {
@@ -409,6 +464,11 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                         .check => |k| {
                             const rows = cache.rows orelse aegis.assert.never("a search of an automaton with lookaround is given its rows");
                             if (rows.cache.stored(rows.plan, k.row, at) == k.negated) break;
+                            // The last place the path took it, for its groups to be rebuilt.
+                            if (k.slot < stride) {
+                                push(cache, &depth, .{ .restore = .{ .slot = k.slot, .value = slots[k.slot] } });
+                                slots[k.slot] = at;
+                            }
                             id = k.next;
                         },
                     }
