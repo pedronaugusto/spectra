@@ -80,4 +80,24 @@ for (let n = 0; n < 6000; n++) {
   for (let k = 0; k < hl; k++) h += pick(pieces);
   add(p, pick(flagsets), h);
 }
+// Lookaround: curated patterns (zod's among them), then random ones with lookarounds among the
+// tokens. Drawn after the cases above, which stay as they were.
+const lookCurated = [
+  "^(?!\\.)(?!.*\\.\\.)([A-Za-z0-9_'+\\-\\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\\-]*\\.)+[A-Za-z]{2,}$",
+  "^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(?:\\.(?!-)[a-z0-9-]{1,63}(?<!-))*$",
+  "(?<=\\$)\\d+", "(?<!\\d)\\d{3}(?!\\d)", "(?=(a+))", "(?<=(\\d+)(\\d+))$", "(?<=a(?=b)b)c",
+  "^(?!.*\\.\\.)[\\w.]+$", "(?<=^|,)\\w+(?=,|$)", "(?=a)(?!b)\\w", "q(?!u)", "(?<=é)x", "(?<!😀)a",
+  "(?<=(a)|b)c", "(?=(?<=a)b)\\w", "(?<!a(?=b))c", "(?:(?=(\\w))\\w)+", "(?<=\\b\\w)\\w", "\\w(?=\\s|$)",
+];
+for (const p of lookCurated) for (const f of flagsets) for (const h of haystacks) if (rand(3) === 0) add(p, f, h);
+const lookTokens = tokens.concat(["(?=", "(?!", "(?<=", "(?<!", "(?=a)", "(?<=a)", "(?!b)", "(?<!b)"]);
+for (let n = 0; n < 3000; n++) {
+  let p = "";
+  const len = 1 + rand(7);
+  for (let k = 0; k < len; k++) p += pick(lookTokens);
+  let h = "";
+  const hl = rand(7);
+  for (let k = 0; k < hl; k++) h += pick(pieces);
+  add(p, pick(flagsets), h);
+}
 process.stdout.write(JSON.stringify({ node: process.version, cases }, null, 0).replace(/\},\{/g, "},\n{") + "\n");

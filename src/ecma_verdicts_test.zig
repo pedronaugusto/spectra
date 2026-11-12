@@ -1,6 +1,7 @@
 //! V8's verdicts on ECMAScript patterns (testdata/v8/matches.json, written by generate.mjs
-//! under Node): what `exec` finds from the haystack's start, each group's span in UTF-8 bytes,
-//! against what spectra's ECMAScript dialect finds.
+//! under Node v26.10.0, a dev-time tool outside the build): what `exec` finds from the
+//! haystack's start, each group's span in UTF-8 bytes, against what spectra's ECMAScript dialect
+//! finds. Lookaround patterns among them: curated (zod's) and random.
 const std = @import("std");
 const strand = @import("strand");
 const shakedown = @import("shakedown");
@@ -72,6 +73,8 @@ const Tally = struct {
     path_lookaround_scan_lazy_dfa: usize = 0,
     path_lookaround_scan_fell_back: usize = 0,
     no_lazy_dfa: usize = 0,
+    /// Patterns with lookaround (compiled once per pattern and flags).
+    lookaround_patterns: usize = 0,
     /// Each case's match found again by `find`, its start each way (`Regex.Cache.Start`), and
     /// the same span as the captures' group 0.
     start_reverse_dfa: usize = 0,
@@ -140,8 +143,11 @@ test "V8's verdicts, through the ECMAScript dialect" {
                 return error.TestUnexpectedResult;
             };
             errdefer re.deinit();
-            if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
-            if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
+            // A pattern with lookaround keeps its lazy DFAs with its oracle, counted by path.
+            if (re.look == null) {
+                if (!re.engines().lazy_dfa) tally.no_lazy_dfa += 1;
+                if (!re.engines().reverse_dfa) tally.no_reverse_dfa += 1;
+            } else tally.lookaround_patterns += 1;
             var alone = try Regex.compile(testing.allocator, .init(case.pattern), .{ .syntax = syntaxOf(case.flags), .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
             errdefer alone.deinit();
             try testing.expect(!alone.engines().lazy_dfa and !alone.engines().backtrack and !alone.engines().onepass and !alone.engines().prefilter);
@@ -223,41 +229,46 @@ test "V8's verdicts, through the ECMAScript dialect" {
     }
     errdefer std.debug.print("{any}\n", .{tally});
     try testing.expectEqualStrings("v26.10.0", file.node);
-    // Counted, so a change in either direction shows. Captures clear per iteration (17 cases
-    // came to agree) and an iteration past the minimum that matched empty fails (the rest): the
-    // engine now says what the oracle says on every case, and differs from V8 only where V8
-    // reads code units.
+    // Counted, so a change in either direction shows. The engine says what ECMA-262's matcher
+    // says on every case, and differs from V8 only where V8 reads code units. The cases with
+    // lookaround (curated, zod's among them, and random) agree like the rest.
     try testing.expectEqual(Tally{
-        .cases = 9480,
-        .agree = 9422,
-        .refused_code_unit_split = 55,
-        .differ_code_units = 3,
+        .cases = 14596,
+        .agree = 14532,
+        .refused_code_unit_split = 60,
+        .differ_code_units = 4,
         .is_match_differ = 0,
-        .oracle_agree = 9422,
-        .oracle_code_units = 3,
+        .oracle_agree = 14532,
+        .oracle_code_units = 4,
         .oracle_budget = 0,
         // The lazy DFA answers the rest; it quits on a byte past 0x7f where `\b` or `m`'s lines
         // read code points, and the PikeVM answers those.
-        .path_lazy_dfa = 7736,
-        .path_lazy_dfa_fell_back = 124,
-        .path_reverse_anchored = 116,
-        .path_literal = 1058,
-        .path_reverse_suffix = 84,
-        .path_reverse_inner = 307,
+        .path_lazy_dfa = 8384,
+        .path_lazy_dfa_fell_back = 145,
+        .path_reverse_anchored = 129,
+        .path_literal = 1177,
+        .path_reverse_suffix = 104,
+        .path_reverse_inner = 329,
         .no_lazy_dfa = 0,
+        // Patterns with lookaround: the lazy DFA with its lanes and columns, or the PikeVM where
+        // it quits on a byte past 0x7f.
+        .lookaround_patterns = 498,
+        .path_lookaround_lazy_dfa = 4194,
+        .path_lookaround_lazy_dfa_fell_back = 74,
         // `find` says what the captures' group 0 says on every case; the reverse lazy DFA finds
-        // each start where the lazy DFA found the end, through ECMAScript's empty checks forward.
-        .start_reverse_dfa = 3081,
+        // each start where the lazy DFA found the end, through ECMAScript's empty checks forward,
+        // and the PikeVM the start of a match with lookaround.
+        .start_reverse_dfa = 3297,
         .start_reverse_dfa_fell_back = 0,
-        .start_pikevm = 40,
-        .start_prefilter = 120,
+        .start_pikevm = 1279,
+        .start_prefilter = 130,
         .no_reverse_dfa = 0,
-        // Every case's captures are the one-pass DFA's or the backtracker's, the PikeVM alone
-        // saying the same.
-        .slots_backtrack = 837,
+        // Captures: the one-pass DFA's or the backtracker's, and the PikeVM's for lookaround,
+        // the PikeVM alone saying the same.
+        .slots_backtrack = 872,
         .slots_backtrack_fell_back = 0,
-        .slots_pikevm = 0,
-        .slots_onepass = 2404,
+        .slots_pikevm = 1232,
+        .slots_onepass = 2602,
     }, tally);
 }
 
