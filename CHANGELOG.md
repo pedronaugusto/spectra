@@ -10,7 +10,9 @@ follow [Semantic Versioning](https://semver.org/).
 
 - Lookaround's first phase, not yet searched: the ECMAScript translation keeps lookahead and lookbehind, positive
   and negative and nested, numbered in preorder, and the oracle builds each one's row (its truth at every position,
-  innermost first, by a scan that writes every match). A pattern holding one is still refused, by one reason,
+  innermost first, by a scan that writes every match). A lookaround nested the way its parent's scan reads is
+  streamed in that scan, a bit at the position being read, and only the others are stored. A pattern holding one is
+  still refused, by one reason,
   `unsupported_lookaround`, which replaces `unsupported_lookahead`, `unsupported_lookbehind` and
   `unsupported_nested_lookaround`.
 - `Automaton`, the stepping automaton over a pattern's or a set's forward lazy DFA of the all kind (`Regex.automaton`,

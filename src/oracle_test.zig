@@ -1,6 +1,8 @@
-//! Lookaround's rows (oracle.zig): each row at every position is what ECMA-262's own matcher
-//! (testing/ecma.zig) says the lookaround is there, on random patterns with lookarounds nested
-//! both ways, and each row's scan stays within states times positions.
+//! Lookaround's rows (oracle.zig): each stored row at every position is what ECMA-262's own
+//! matcher (testing/ecma.zig) says the lookaround is there, on random patterns with lookarounds
+//! nested both ways; a lookaround nested the same way as its parent is streamed, not stored, and
+//! its parent's row, which reads it, is still ECMA-262's; each scan stays within its lanes'
+//! states times positions.
 const std = @import("std");
 const shakedown = @import("shakedown");
 const Syntax = @import("Syntax.zig");
@@ -32,7 +34,7 @@ fn rowText(a: std.mem.Allocator, pattern: []const u8, haystack: []const u8, row:
     defer c.deinit(gpa);
     try oracle.fill(&p, &c, haystack);
     const out = try a.alloc(u8, haystack.len + 1);
-    for (out, 0..) |*o, at| o.* = if (c.holds(row, at)) '1' else '0';
+    for (out, 0..) |*o, at| o.* = if (c.holds(p.rows[row].slot.?, at)) '1' else '0';
     return out;
 }
 
@@ -53,6 +55,29 @@ test "a lookbehind holds where its body ends, a lookahead where it starts, inner
     // built first, and holds where "xa" ends.
     try testing.expectEqualStrings("000100", try rowText(a, "(?=a(?<!xa)b)", "xabab", 0));
     try testing.expectEqualStrings("001000", try rowText(a, "(?=a(?<!xa)b)", "xabab", 1));
+    // Nested the same way: streamed in the parent's scan, which reads it at each position.
+    try testing.expectEqualStrings("010100", try rowText(a, "(?=a(?=b))", "xabab", 0));
+    try testing.expectEqualStrings("000101", try rowText(a, "(?<=(?<=a)b)", "xabab", 0));
+    // Both in one body: the inner lookbehind streamed, the inner lookahead stored.
+    try testing.expectEqualStrings("000100", try rowText(a, "(?<=(?<=xa)b(?=a))", "xabab", 0));
+}
+
+test "a lookaround read the way of the scan that queries it is streamed; the other way, stored" {
+    var state: std.heap.ArenaAllocator = .init(gpa);
+    defer state.deinit();
+    const hir = try hirOf(state.allocator(), "(?=a(?=b)(?<=a))(?<=c(?<=d(?=e)))");
+    var p = try oracle.plan(gpa, &hir, .{}, null);
+    defer p.deinit(gpa);
+    // 0 ahead (top: stored), 1 ahead in an ahead (streamed), 2 behind in an ahead (stored),
+    // 3 behind (top: stored), 4 behind in a behind (streamed), 5 ahead in a behind (stored).
+    const want = [_]bool{ true, false, true, true, false, true };
+    for (p.rows, want) |r, stored| try testing.expectEqual(stored, r.slot != null);
+    try testing.expectEqual(4, p.stored);
+    // With a forward main scan, the top lookbehind streams there too.
+    var forward = try oracle.plan(gpa, &hir, .{ .main = .forward }, null);
+    defer forward.deinit(gpa);
+    try testing.expectEqual(null, forward.rows[3].slot);
+    try testing.expectEqual(3, forward.stored);
 }
 
 test "rows are refused before a byte is read where they would pass the store" {
@@ -71,7 +96,7 @@ test "rows are refused before a byte is read where they would pass the store" {
     try testing.expectError(error.HaystackTooLong, oracle.fill(&p, &c, &longer));
 }
 
-var reached: struct { patterns: usize = 0, rows: usize = 0, ahead: usize = 0, behind: usize = 0, nested: usize = 0, held: usize = 0, budget: usize = 0 } = .{};
+var reached: struct { patterns: usize = 0, rows: usize = 0, ahead: usize = 0, behind: usize = 0, nested: usize = 0, streamed: usize = 0, held: usize = 0, budget: usize = 0 } = .{};
 
 fn anyRows(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -103,6 +128,11 @@ fn anyRows(_: void, case: *shakedown.Case) !void {
                 .behind => reached.behind += 1,
             }
             if (la.index > 0) reached.nested += 1;
+            // A streamed row is checked through its parent's, which reads it.
+            const slot = p.rows[la.index].slot orelse {
+                reached.streamed += 1;
+                continue;
+            };
             for (0..hay.items.len + 1) |at| {
                 const want = spec.lookaroundHolds(a, &hir, @enumFromInt(i), hay.items, at, 20_000) catch |err| switch (err) {
                     error.Budget => {
@@ -111,8 +141,8 @@ fn anyRows(_: void, case: *shakedown.Case) !void {
                     },
                     else => return err,
                 };
-                if (want != c.holds(la.index, at)) {
-                    std.debug.print("/{s}/ on {any}: row {d} at {d}: {}, ECMA-262 {}\n", .{ text.items, hay.items, la.index, at, c.holds(la.index, at), want });
+                if (want != c.holds(slot, at)) {
+                    std.debug.print("/{s}/ on {any}: row {d} at {d}: {}, ECMA-262 {}\n", .{ text.items, hay.items, la.index, at, c.holds(slot, at), want });
                     return error.TestUnexpectedResult;
                 }
                 if (want) reached.held += 1;
@@ -127,5 +157,5 @@ test "fuzz: every lookaround's row is ECMA-262's answer at every position, neste
     try shakedown.check(gpa, {}, anyRows, .{ .cases = 4000, .seed = 0x0ac1e });
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
-    try testing.expect(reached.patterns > 1500 and reached.ahead > 1000 and reached.behind > 1000 and reached.nested > 500 and reached.held > 3000);
+    try testing.expect(reached.patterns > 1500 and reached.ahead > 1000 and reached.behind > 1000 and reached.nested > 500 and reached.streamed > 200 and reached.held > 3000);
 }
