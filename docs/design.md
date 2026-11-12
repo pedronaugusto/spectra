@@ -215,6 +215,8 @@ and Aho-Corasick need only the baseline.
   other line terminators) is passed over and counted by reason.
 - **V8's verdicts**: ECMAScript patterns run under Node (`testdata/v8`), compared span for span,
   lookaround patterns among them.
+- **RE2's search tests**: the pattern and text table of re2/testing/search_test.cc, in three modes,
+  over each text and its sub-spans, anchored and not, against the test backtracker.
 - **test262**: every RegExp test file that writes a lookaround (52), its assertions' expected answers
   transcribed (`src/test262_test.zig`), backreferences refused by name and early errors invalid.
 - **Oracles**: a bounded backtracker over the automaton (`testing/backtrack.zig`) and ECMA-262's

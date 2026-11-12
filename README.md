@@ -142,7 +142,8 @@ over the HIR. A bounded backtracker over the automaton is the oracle for random 
 dialects: the PikeVM, the lazy DFAs forward and reversed, the bounded backtracker, the one-pass DFA, every prefilter
 and every strategy are checked against it or against the PikeVM. The linear bound is counted, not timed, on the
 shapes that make backtracking exponential. test262's RegExp lookaround cases (every file that writes a
-lookaround) are transcribed with their expected answers, and V8's verdicts include lookaround patterns. Every property runs seeded in `bay test`, and under `bay test --fuzz`
+lookaround) are transcribed with their expected answers, V8's verdicts include lookaround patterns and replace and
+split, and RE2's search tests run against the test backtracker. Every property runs seeded in `bay test`, and under `bay test --fuzz`
 Zig's fuzzer searches further; the release tier's `bay hardened-fuzz` runs them under the fuzzer with safety on.
 
 ## License
@@ -153,3 +154,5 @@ src/hir/suffix.zig and src/hir/inner.zig include code translated from the Rust r
 LICENSES/.
 src/test262_test.zig transcribes test cases from test262, the ECMAScript test suite (BSD-3-Clause); its licence is
 LICENSES/test262-BSD.txt.
+src/re2_search_test.zig holds the pattern and text table of RE2's search tests (BSD-3-Clause); its licence is
+LICENSES/re2-BSD.txt.
