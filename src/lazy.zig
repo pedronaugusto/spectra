@@ -73,6 +73,12 @@ pub const Context = enum(u3) { start, lf, cr, word, other };
 /// Which way a lazy DFA reads.
 pub const Direction = enum { forward, reverse };
 
+/// What a forward lazy DFA does at a match. Leftmost-first drops every thread after the first
+/// to reach a match, as the PikeVM does; all drops none, and a state's match is the set of
+/// patterns whose match states its closure reached (a set's `matches`, a whole search, and the
+/// stepping automaton). Reversed, a match drops nothing either way.
+pub const Kind = enum { leftmost_first, all };
+
 /// The byte after a position: the same, or the haystack's end.
 const Ahead = enum(u3) { end, lf, cr, word, other };
 
@@ -100,6 +106,9 @@ const returns: LookSet = .initMany(&.{ .start_line_crlf, .end_line_crlf, .start_
 /// to the assertions, and how its cache divides. Immutable; every state lives in a `Cache`.
 pub const Dfa = struct {
     direction: Direction,
+    kind: Kind,
+    /// The automaton's patterns: 1 but for a set's.
+    patterns: u32,
     /// The unanchored start's automaton state: the seeds of a state back at the start.
     restart: Key,
     /// Each byte's class: bytes that no transition and no assertion tells apart.
@@ -127,17 +136,20 @@ pub const Dfa = struct {
     pub fn bytes(d: *const Dfa) usize {
         const store = @as(usize, d.states) * d.stride * @sizeOf(u32) + @as(usize, d.states) * @sizeOf(Rec) +
             @as(usize, d.keys) * @sizeOf(Key) + @as(usize, d.slots) * @sizeOf(u32);
-        const scratch = 2 * @as(usize, d.threads) * SparseSet.bytesPer + @as(usize, d.threads) * @sizeOf(Key) +
-            @as(usize, d.stack) * @sizeOf(Explore);
+        // The two closure sets, the stack, and `source` and `joined`: seeds and patterns each.
+        const scratch = 2 * @as(usize, d.threads) * SparseSet.bytesPer + @as(usize, d.stack) * @sizeOf(Explore) +
+            2 * (@as(usize, d.threads) + d.patterns) * @sizeOf(Key);
         return store + scratch;
     }
 };
 
 /// The lazy DFA of `nfa` with a store of `capacity` bytes, or null when that cannot hold the
 /// fewest states a search needs: the pattern then has no lazy DFA (`Regex.engines`).
-pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction) ?Dfa {
+pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction, kind: Kind) ?Dfa {
     var d: Dfa = undefined;
     d.direction = direction;
+    d.kind = kind;
+    d.patterns = nfa.patterns;
     d.restart = nfa.start_unanchored.raw();
     const quit = nfa.looks.intersectWith(wide).count() > 0;
     const word = nfa.looks.intersectWith(words).count() > 0;
@@ -173,8 +185,9 @@ pub fn build(nfa: *const Nfa, capacity: usize, direction: Direction) ?Dfa {
     const per_state = d.stride * @sizeOf(u32) + @sizeOf(Rec) + 4 * @sizeOf(u32);
     const states = half / per_state;
     const keys = half / @sizeOf(Key);
-    // The state left across a clear and the one built, each at most every state as a seed.
-    if (states < min_states or keys < 2 * nfa.states.len) return null;
+    // The state left across a clear and the one built, each at most every state as a seed and
+    // every pattern as a match.
+    if (states < min_states or keys < 2 * (nfa.states.len + nfa.patterns)) return null;
     d.states = @intCast(@min(states, std.math.maxInt(u32) / 4));
     d.keys = @intCast(@min(keys, std.math.maxInt(u32)));
     d.slots = std.math.ceilPowerOfTwoAssert(u32, 2 * d.states);
@@ -225,10 +238,12 @@ fn aheadOf(kind: Context) Ahead {
 }
 
 /// A state as the cache keeps it: its seeds (`keys[start..][0..len]`, state ids), the byte before
-/// it, and whether a match ended at the position before the byte that led to it.
+/// it, and whether a match ended at the position before the byte that led to it; in the all
+/// kind, which patterns' matches (`keys[start + len ..][0..matched]`, ascending).
 const Rec = struct {
     start: u32,
     len: u32,
+    matched: u32 = 0,
     hash: u32,
     context: Context,
     match: bool,
@@ -255,8 +270,10 @@ pub const Cache = struct {
     a: SparseSet,
     /// The seeds it steps into, by state id.
     b: SparseSet,
-    /// A state's seeds kept across a clear.
+    /// A state's seeds and patterns kept across a clear.
     source: []Key,
+    /// A state's seeds and then its patterns, as `next` interns them.
+    joined: []Key,
     stack: []Explore,
     /// The automaton it was made for, by its threads: a cache of another is refused.
     threads: u32,
@@ -288,10 +305,12 @@ pub const Cache = struct {
         errdefer a.deinit(gpa);
         var b: SparseSet = try .init(gpa, d.threads);
         errdefer b.deinit(gpa);
-        const source = try gpa.alloc(Key, d.threads);
+        const source = try gpa.alloc(Key, @as(usize, d.threads) + d.patterns);
         errdefer gpa.free(source);
+        const joined = try gpa.alloc(Key, @as(usize, d.threads) + d.patterns);
+        errdefer gpa.free(joined);
         const stack = try gpa.alloc(Explore, d.stack);
-        var c: Cache = .{ .rows = rows, .recs = recs, .keys = keys, .table = table, .starts = undefined, .a = a, .b = b, .source = source, .stack = stack, .threads = d.threads };
+        var c: Cache = .{ .rows = rows, .recs = recs, .keys = keys, .table = table, .starts = undefined, .a = a, .b = b, .source = source, .joined = joined, .stack = stack, .threads = d.threads };
         c.reset(d);
         return c;
     }
@@ -304,6 +323,7 @@ pub const Cache = struct {
         c.a.deinit(gpa);
         c.b.deinit(gpa);
         gpa.free(c.source);
+        gpa.free(c.joined);
         gpa.free(c.stack);
         c.* = undefined;
     }
@@ -320,15 +340,16 @@ pub const Cache = struct {
 
     /// The id of the state of these seeds, built if new. A full store is cleared first, and
     /// `from`, the state being left, kept across it under its new id.
-    fn intern(c: *Cache, d: *const Dfa, from: ?*u32, context: Context, match: bool, keys: []const Key) Error!u32 {
-        const h = hashOf(context, match, keys);
-        if (c.find(d, h, context, match, keys)) |id| return id;
+    /// `keys` are the seeds, its first `seeds`, and then the patterns matched.
+    fn intern(c: *Cache, d: *const Dfa, from: ?*u32, context: Context, match: bool, keys: []const Key, seeds: usize) Error!u32 {
+        const h = hashOf(context, match, keys, seeds);
+        if (c.find(d, h, context, match, keys, seeds)) |id| return id;
         if (c.len == d.states or c.keys_len + keys.len > d.keys) {
             try c.clear(d, from);
             // The state left may be the one built: a loop back to itself.
-            if (c.find(d, h, context, match, keys)) |id| return id;
+            if (c.find(d, h, context, match, keys, seeds)) |id| return id;
         }
-        return c.add(d, h, context, match, keys);
+        return c.add(d, h, context, match, keys, seeds);
     }
 
     fn clear(c: *Cache, d: *const Dfa, from: ?*u32) Error!void {
@@ -338,16 +359,17 @@ pub const Cache = struct {
         c.built_since = 0;
         const f = from orelse return c.reset(d);
         const r = c.recs[f.*];
-        @memcpy(c.source[0..r.len], c.keys[r.start..][0..r.len]);
+        const all = r.len + r.matched;
+        @memcpy(c.source[0..all], c.keys[r.start..][0..all]);
         c.reset(d);
-        f.* = c.add(d, r.hash, r.context, r.match, c.source[0..r.len]);
+        f.* = c.add(d, r.hash, r.context, r.match, c.source[0..all], r.len);
     }
 
-    fn add(c: *Cache, d: *const Dfa, h: u32, context: Context, match: bool, keys: []const Key) u32 {
+    fn add(c: *Cache, d: *const Dfa, h: u32, context: Context, match: bool, keys: []const Key, seeds: usize) u32 {
         const id = c.len;
         c.len += 1;
         @memcpy(c.keys[c.keys_len..][0..keys.len], keys);
-        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(keys.len), .hash = h, .context = context, .match = match, .restart = keys.len == 1 and keys[0] == d.restart };
+        c.recs[id] = .{ .start = c.keys_len, .len = @intCast(seeds), .matched = @intCast(keys.len - seeds), .hash = h, .context = context, .match = match, .restart = seeds == 1 and keys.len == 1 and keys[0] == d.restart };
         c.keys_len += @intCast(keys.len);
         @memset(c.rows[@as(usize, id) * d.stride ..][0..d.stride], unknown);
         const mask = d.slots - 1;
@@ -358,20 +380,26 @@ pub const Cache = struct {
         return id;
     }
 
-    fn find(c: *const Cache, d: *const Dfa, h: u32, context: Context, match: bool, keys: []const Key) ?u32 {
+    fn find(c: *const Cache, d: *const Dfa, h: u32, context: Context, match: bool, keys: []const Key, seeds: usize) ?u32 {
         const mask = d.slots - 1;
         var slot = h & mask;
         while (c.table[slot] != 0) : (slot = (slot + 1) & mask) {
             const id = c.table[slot] - 1;
             const r = c.recs[id];
-            if (r.hash == h and r.context == context and r.match == match and std.mem.eql(Key, c.keys[r.start..][0..r.len], keys)) return id;
+            if (r.hash == h and r.context == context and r.match == match and r.len == seeds and std.mem.eql(Key, c.keys[r.start..][0 .. r.len + r.matched], keys)) return id;
         }
         return null;
     }
+
+    /// The patterns whose matches state `s` holds, ascending: in the all kind.
+    pub fn patternsOf(c: *const Cache, s: u32) []const Key {
+        const r = c.recs[s];
+        return c.keys[r.start + r.len ..][0..r.matched];
+    }
 };
 
-fn hashOf(context: Context, match: bool, keys: []const Key) u32 {
-    const seed = @as(u64, @intFromEnum(context)) * 2 + @intFromBool(match);
+fn hashOf(context: Context, match: bool, keys: []const Key, seeds: usize) u32 {
+    const seed = (@as(u64, @intFromEnum(context)) * 2 + @intFromBool(match)) * 0x1_0000_0000 + seeds;
     return @truncate(std.hash.Wyhash.hash(seed, std.mem.sliceAsBytes(keys)));
 }
 
@@ -509,6 +537,59 @@ fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*co
     return found;
 }
 
+/// In the all kind: every pattern with a match in `input`, as bits of `out` set, and how many
+/// were new; with `input.earliest`, it stops at the first match. With `input.whole`, only a
+/// match ending at the span's end counts, and the search is anchored. The scan goes to the
+/// span's end, or until every pattern has matched, or the dead state. In UTF-8, where a match may
+/// be empty, one ending inside a code point's encoding is not counted, as the PikeVM does.
+/// Bits set before a quit or a give-up are matches; the caller's fallback finds the rest.
+pub fn searchAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, out: *std.DynamicBitSetUnmanaged) Error!usize {
+    aegis.assert.invariant(d.direction == .forward and d.kind == .all, "an all search reads a forward lazy DFA of the all kind");
+    aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache searches the automaton it was made for");
+    aegis.assert.invariant(input.span.start <= input.span.end and input.span.end <= input.haystack.len, "a span lies in its haystack");
+    aegis.assert.invariant(out.bit_length == d.patterns, "a pattern set holds a bit per pattern");
+    c.visited = 0;
+    const anchored = input.startAnchored() or nfa.start_anchored == nfa.start_unanchored;
+    var s = try startState(nfa, d, c, input, anchored);
+    var found: usize = 0;
+    var have = out.count();
+    const splits = nfa.utf8 and nfa.empty_ok;
+    var at = input.span.start;
+    while (at < input.span.end) : (at += 1) {
+        if (s == dead or have == d.patterns) return found;
+        const byte = input.haystack[at];
+        const class = d.classes[byte];
+        if (d.quit == class) return error.Quit;
+        c.visited += 1;
+        c.bytes_since += 1;
+        const t = c.rows[@as(usize, s) * d.stride + class];
+        s = if (t != unknown) t else try next(nfa, d, c, s, byte);
+        // A match flagged here ended at `at`, before the byte just read.
+        if (c.recs[s].match and !input.whole and !(splits and !pikevm.isBoundary(input.haystack, at))) {
+            for (c.patternsOf(s)) |p| if (!out.isSet(p)) {
+                out.set(p);
+                found += 1;
+                have += 1;
+            };
+            if (input.earliest) return found;
+        }
+    }
+    if (s == dead or have == d.patterns) return found;
+    // The byte after the span, or the haystack's end, decides a match that ends at its end.
+    const after: ?u8 = if (input.span.end < input.haystack.len) input.haystack[input.span.end] else null;
+    const class: u32 = if (after) |b| d.classes[b] else d.stride - 1;
+    if (after) |b| if (d.quit == d.classes[b]) return error.Quit;
+    const t = c.rows[@as(usize, s) * d.stride + class];
+    s = if (t != unknown) t else try next(nfa, d, c, s, after);
+    if (c.recs[s].match and !(splits and !pikevm.isBoundary(input.haystack, input.span.end))) {
+        for (c.patternsOf(s)) |p| if (!out.isSet(p)) {
+            out.set(p);
+            found += 1;
+        };
+    }
+    return found;
+}
+
 fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored: bool) Error!u32 {
     const at = input.span.start;
     const context: Context = if (at == 0) d.start else blk: {
@@ -523,7 +604,7 @@ fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored
     const index = @as(usize, @intFromEnum(context)) * 2 + @intFromBool(anchored);
     if (c.starts[index] != unknown) return c.starts[index];
     const seed: Key = (if (anchored) nfa.start_anchored else nfa.start_unanchored).raw();
-    const id = try c.intern(d, null, context, false, &.{seed});
+    const id = try c.intern(d, null, context, false, &.{seed}, 1);
     c.starts[index] = id;
     return id;
 }
@@ -546,11 +627,20 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
     for (c.keys[rec.start..][0..rec.len]) |seed| closure(nfa, c, @fromBackingInt(seed), decide);
     c.b.len = 0;
     var match = false;
+    var matched: usize = 0;
     for (c.a.items()) |key| {
         const target: ?Nfa.StateId = switch (nfa.state(pikevm.stateOf(nfa, key))) {
-            .match => {
+            .match => |pattern| {
                 match = true;
-                if (d.direction == .forward) break;
+                if (d.direction == .forward and d.kind == .leftmost_first) break;
+                if (d.kind == .all) {
+                    // Kept apart from the seeds at the end of `joined`, then put after them.
+                    const pats = c.joined[c.joined.len - d.patterns ..];
+                    if (std.mem.indexOfScalar(Key, pats[0..matched], pattern) == null) {
+                        pats[matched] = pattern;
+                        matched += 1;
+                    }
+                }
                 continue;
             },
             .byte_range => |t| if (unit) |b| (if (t.contains(b)) t.next else null) else null,
@@ -562,7 +652,15 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8) Erro
     }
     const class: u32 = if (unit) |b| d.classes[b] else d.stride - 1;
     const seeds = c.b.items();
-    const to = if (seeds.len == 0 and !match) dead else try c.intern(d, &from, if (unit) |b| d.kinds[b] else .other, match, seeds);
+    var keys = seeds;
+    if (matched > 0) {
+        const pats = c.joined[c.joined.len - d.patterns ..][0..matched];
+        std.mem.sort(Key, pats, {}, std.sort.asc(Key));
+        std.mem.copyForwards(Key, c.joined[seeds.len..][0..matched], pats);
+        @memcpy(c.joined[0..seeds.len], seeds);
+        keys = c.joined[0 .. seeds.len + matched];
+    }
+    const to = if (seeds.len == 0 and !match) dead else try c.intern(d, &from, if (unit) |b| d.kinds[b] else .other, match, keys, seeds.len);
     c.rows[@as(usize, from) * d.stride + class] = to;
     return to;
 }

@@ -11,8 +11,12 @@
 //!
 //! `matches` takes each pattern's matches on their own (the all kind: no thread is dropped at a
 //! match, regex's `RegexSet::matches`); `isMatch` and `first` take the patterns as one
-//! alternation in index order, leftmost-first. All are the PikeVM's, linear in the haystack and
-//! the set's automaton.
+//! alternation in index order, leftmost-first. Two lazy DFAs answer them: one of the all kind,
+//! for `matches` and every whole search, and one leftmost-first, for where `first`'s match ends,
+//! the PikeVM then searching the span cut there for its start and pattern. Where a lazy DFA quits
+//! or gives up, or the set has none (`Limits.lazy_dfa` too small for its fewest states), the
+//! PikeVM answers the whole span. Every path is linear in the haystack and the set's automaton,
+//! and `Cache.last` says which answered.
 const Set = @This();
 const std = @import("std");
 const aegis = @import("aegis");
@@ -25,6 +29,7 @@ const Hir = @import("hir/Hir.zig");
 const Nfa = @import("nfa/Nfa.zig");
 const compile_mod = @import("nfa/compile.zig");
 const pikevm = @import("pikevm.zig");
+const lazy = @import("lazy.zig");
 
 pub const Span = Regex.Span;
 pub const Input = Regex.Input;
@@ -45,6 +50,10 @@ pub const Match = struct {
 
 gpa: Allocator,
 nfa: Nfa,
+/// The lazy DFA of the all kind; null where `Limits.lazy_dfa` holds too few states.
+all: ?lazy.Dfa,
+/// The leftmost-first lazy DFA; null alike.
+leftmost: ?lazy.Dfa,
 /// This set's identity: no two sets compiled in a process share it.
 id: u64,
 
@@ -84,11 +93,30 @@ pub fn compile(gpa: Allocator, sources: []const aegis.input.Untrusted([]const u8
         .ecma = options.syntax.dialect == .ecmascript,
     }, options.diagnostic);
     errdefer nfa.deinit(gpa);
-    if ((pikevm.sizes(&nfa).bytes() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+    const all = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .all);
+    const leftmost = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .leftmost_first);
+    if ((cacheBytesOf(&nfa, all, leftmost) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
         if (options.diagnostic) |d| d.* = .{ .reason = .cache_too_large };
         return error.TooLarge;
     }
-    return .{ .gpa = gpa, .nfa = nfa, .id = takeId() };
+    return .{ .gpa = gpa, .nfa = nfa, .all = all, .leftmost = leftmost, .id = takeId() };
+}
+
+/// What a `Cache` of the set allocates, or null past `usize`: what `Limits.cache` bounds.
+fn cacheBytesOf(nfa: *const Nfa, all: ?lazy.Dfa, leftmost: ?lazy.Dfa) ?usize {
+    var total = pikevm.sizes(nfa).bytes() orelse return null;
+    if (all) |d| total = std.math.add(usize, total, d.bytes()) catch return null;
+    if (leftmost) |d| total = std.math.add(usize, total, d.bytes()) catch return null;
+    const bits = (nfa.patterns + 63) / 64 * 8;
+    return std.math.add(usize, total, bits) catch null;
+}
+
+/// The engines the set has: the PikeVM always, and each lazy DFA unless its store cannot hold the
+/// fewest states a search needs.
+pub const Engines = struct { pikevm: bool = true, all: bool, leftmost: bool };
+
+pub fn engines(set: *const Set) Engines {
+    return .{ .all = set.all != null, .leftmost = set.leftmost != null };
 }
 
 pub fn deinit(set: *Set) void {
@@ -110,17 +138,41 @@ pub fn pattern(set: *const Set, m: Match) Pattern {
 /// What one task's searches of the set need, allocated once: no search allocates.
 pub const Cache = struct {
     pike: pikevm.Cache,
+    all: ?lazy.Cache,
+    leftmost: ?lazy.Cache,
+    /// A bit per pattern, for a search that asks which matched without a caller's set.
+    scratch: std.DynamicBitSetUnmanaged,
     /// The set it was made for.
     set: u64,
+    /// How the last search was answered, for the tests that count each path.
+    last: Path = .pikevm,
+
+    pub const Path = enum {
+        /// The PikeVM alone: the set has no lazy DFA for the search.
+        pikevm,
+        /// A lazy DFA, and for `first` the PikeVM over the span cut at the match's end.
+        lazy_dfa,
+        /// The lazy DFA quit or gave up, and the PikeVM searched the span.
+        lazy_dfa_fell_back,
+    };
 
     pub fn deinit(c: *Cache, gpa: Allocator) void {
         c.pike.deinit(gpa);
+        if (c.all) |*l| l.deinit(gpa);
+        if (c.leftmost) |*l| l.deinit(gpa);
+        c.scratch.deinit(gpa);
         c.* = undefined;
     }
 };
 
 pub fn cache(set: *const Set, gpa: Allocator) Allocator.Error!Cache {
-    return .{ .pike = try .init(gpa, &set.nfa), .set = set.id };
+    var pike: pikevm.Cache = try .init(gpa, &set.nfa);
+    errdefer pike.deinit(gpa);
+    var all: ?lazy.Cache = if (set.all) |*d| try .init(gpa, d) else null;
+    errdefer if (all) |*l| l.deinit(gpa);
+    var leftmost: ?lazy.Cache = if (set.leftmost) |*d| try .init(gpa, d) else null;
+    errdefer if (leftmost) |*l| l.deinit(gpa);
+    return .{ .pike = pike, .all = all, .leftmost = leftmost, .scratch = try .initEmpty(gpa, set.len()), .set = set.id };
 }
 
 /// Which patterns matched: a bit per pattern, allocated once by the caller (`Set.patterns`) and
@@ -179,8 +231,9 @@ pub fn patterns(set: *const Set, gpa: Allocator) Allocator.Error!Patterns {
 pub fn isMatch(set: *const Set, c: *Cache, input: Input) SearchError!bool {
     set.checkCache(c);
     var earliest = input;
-    earliest.earliest = !input.whole;
-    return pikevm.search(&set.nfa, &c.pike, earliest, &.{}) != null;
+    earliest.earliest = true;
+    c.scratch.unsetAll();
+    return set.searchAll(c, earliest, &c.scratch) > 0;
 }
 
 /// Every pattern with a match in `input`, each pattern's matches taken on their own, in `out`
@@ -190,7 +243,24 @@ pub fn matches(set: *const Set, c: *Cache, input: Input, out: *Patterns) SearchE
     set.checkCache(c);
     aegis.assert.invariant(out.set == set.id, "a pattern set is filled by the set it was made for");
     out.bits.unsetAll();
-    return pikevm.searchAll(&set.nfa, &c.pike, input, &out.bits) > 0;
+    return set.searchAll(c, input, &out.bits) > 0;
+}
+
+/// The all kind on the lazy DFA, or the PikeVM where it has none, quits or gives up: how many
+/// patterns `out` holds after (callers clear it first).
+fn searchAll(set: *const Set, c: *Cache, input: Input, out: *std.DynamicBitSetUnmanaged) usize {
+    if (set.all) |*d| {
+        if (lazy.searchAll(&set.nfa, d, &c.all.?, input, out)) |found| {
+            c.last = .lazy_dfa;
+            return found;
+        } else |_| c.last = .lazy_dfa_fell_back;
+    } else c.last = .pikevm;
+    // The bits set before the fallback are matches, enough for an earliest search; the PikeVM
+    // finds every pattern's again otherwise.
+    const before = out.count();
+    if (input.earliest and before > 0) return before;
+    _ = pikevm.searchAll(&set.nfa, &c.pike, input, out);
+    return out.count();
 }
 
 /// The leftmost-first match over the set, as if its patterns were one alternation in index
@@ -198,8 +268,29 @@ pub fn matches(set: *const Set, c: *Cache, input: Input, out: *Patterns) SearchE
 /// rows.
 pub fn first(set: *const Set, c: *Cache, input: Input) SearchError!?Match {
     set.checkCache(c);
+    if (input.whole) {
+        // Every match covers the span, and the alternation prefers the lowest pattern.
+        c.scratch.unsetAll();
+        if (set.searchAll(c, input, &c.scratch) == 0) return null;
+        const lowest: u32 = @intCast(c.scratch.findFirstSet().?);
+        return .{ .span = input.span, .index = @fromBackingInt(lowest), .set = set.id };
+    }
+    var cut = input;
+    if (set.leftmost) |*d| {
+        var from: usize = undefined;
+        if (lazy.searchFrom(&set.nfa, d, &c.leftmost.?, input, &from, null)) |found| {
+            c.last = .lazy_dfa;
+            const end = found orelse return null;
+            // Cut at the end, the PikeVM's leftmost-first match is the same: no match starts
+            // earlier, and the preferred one from its start ends there.
+            cut.span = .{ .start = from, .end = end };
+        } else |_| c.last = .lazy_dfa_fell_back;
+    } else c.last = .pikevm;
     var slots: [2]?usize = undefined;
-    _ = pikevm.search(&set.nfa, &c.pike, input, &slots) orelse return null;
+    _ = pikevm.search(&set.nfa, &c.pike, cut, &slots) orelse {
+        aegis.assert.invariant(c.last != .lazy_dfa, "the match the lazy DFA found is found again");
+        return null;
+    };
     return .{ .span = .{ .start = slots[0].?, .end = slots[1].? }, .index = @fromBackingInt(c.pike.pattern), .set = set.id };
 }
 

@@ -12,7 +12,10 @@ follow [Semantic Versioning](https://semver.org/).
   `isMatch`, `matches` (every pattern with a match, each pattern's matches on their own, into a caller-allocated
   `Set.Patterns`), and `first` (the leftmost-first match over the patterns as one alternation, with its pattern).
   Pattern indexes are branded, and a match is checked against the set that found it. A refused pattern is named by
-  `Diagnostic.pattern`. On the PikeVM for now; the lazy DFA's all kind is next.
+  `Diagnostic.pattern`. Two lazy DFAs answer a set: one of the all kind (no thread dropped at a match, a state's
+  match the set of patterns it reached) for `matches`, `isMatch` and whole searches, and one leftmost-first for
+  where `first`'s match ends; the PikeVM where either quits, gives up or is absent (`Set.engines`,
+  `Set.Cache.last`).
 - `Input.whole`: only a match covering the span counts. `Regex` searches it on the PikeVM (`Cache.Path.whole`).
 - `Regex.SearchError` (`error.HaystackTooLong`): every search (`isMatch`, `find`, `captures`, and `Matches.next` and
   `nextCaptures`) returns it, for lookaround's stored rows to come, which a search past `Limits.oracle` refuses by

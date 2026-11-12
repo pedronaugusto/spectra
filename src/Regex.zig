@@ -107,7 +107,7 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
         var held = nfa;
         held.deinit(gpa);
     }
-    const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward);
+    const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .leftmost_first);
     var reverse: ?Reverse = if (dfa == null) null else try compileReverse(gpa, &hir, options, whole);
     errdefer if (reverse) |*r| r.nfa.deinit(gpa);
     var one = try onepass_mod.build(gpa, &nfa, options.limits.onepass.raw());
@@ -170,7 +170,7 @@ fn innerOf(gpa: Allocator, arena: Allocator, hir: *const Hir, options: Options, 
             },
             error.Unsupported => aegis.assert.never("what compiles forward compiles reversed"),
         };
-        const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .reverse) orelse {
+        const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .reverse, .leftmost_first) orelse {
             nfa.deinit(gpa);
             p.deinit(gpa);
             return null;
@@ -225,7 +225,7 @@ fn compileReverse(gpa: Allocator, hir: *const Hir, options: Options, whole: Ast.
         error.TooLarge => return null,
         error.Unsupported => aegis.assert.never("what compiles forward compiles reversed"),
     };
-    const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .reverse) orelse {
+    const dfa = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .reverse, .leftmost_first) orelse {
         nfa.deinit(gpa);
         return null;
     };

@@ -69,6 +69,7 @@ test "a whole search counts only a match that covers the span" {
     try testing.expect(try set.matches(&cache, whole, &out));
     // "a|ab" covers "ab" by its second branch, though leftmost-first prefers the first.
     try testing.expect(!out.contains(@fromBackingInt(0)) and out.contains(@fromBackingInt(1)) and out.contains(@fromBackingInt(2)) and !out.contains(@fromBackingInt(3)));
+    try testing.expectEqual(Set.Cache.Path.lazy_dfa, cache.last);
     const m = (try set.first(&cache, whole)).?;
     try testing.expectEqual(1, set.pattern(m).raw());
     try testing.expectEqual(Set.Span{ .start = 0, .end = 2 }, m.span);
@@ -97,7 +98,66 @@ test "a refused pattern is named by its index, and a set too large names none" {
 
 // Random sets against each pattern alone and against their alternation.
 
-var reached: struct { sets: usize = 0, matched: usize = 0, firsts: usize = 0, wholes: usize = 0, ecma: usize = 0 } = .{};
+var reached: struct {
+    sets: usize = 0,
+    matched: usize = 0,
+    firsts: usize = 0,
+    wholes: usize = 0,
+    ecma: usize = 0,
+    /// Searches each path answered, over the three ways each set is compiled.
+    lazy_dfa: usize = 0,
+    fell_back: usize = 0,
+    pikevm: usize = 0,
+} = .{};
+
+fn countPath(path: Set.Cache.Path) void {
+    switch (path) {
+        .lazy_dfa => reached.lazy_dfa += 1,
+        .lazy_dfa_fell_back => reached.fell_back += 1,
+        .pikevm => reached.pikevm += 1,
+    }
+}
+
+/// The same set with the lazy DFAs in a store of the fewest states, which clears and gives up,
+/// and with none, the PikeVM alone: every answer the same.
+fn sameOnEveryPath(a: std.mem.Allocator, patterns: []const @import("aegis").input.Untrusted([]const u8), syntax: Syntax, haystack: []const u8, want: *const Set.Patterns, want_whole: *const Set.Patterns, want_first: ?Set.Match, first_index: ?u32) !void {
+    // A longer haystack, the case's repeated, so the small store clears and gives up: its answers
+    // are the PikeVM's alone (`store` 0, run first).
+    var long: std.ArrayList(u8) = .empty;
+    for (0..40) |_| try long.appendSlice(a, haystack);
+    var long_want: ?std.DynamicBitSetUnmanaged = null;
+    defer if (long_want) |*w| w.deinit(gpa);
+    for ([_]usize{ 0, 1200 }) |store| {
+        var set = Set.compile(gpa, patterns, .{ .syntax = syntax, .limits = .{ .lazy_dfa = .fromRaw(store) } }) catch |err| switch (err) {
+            error.TooLarge => continue,
+            else => return err,
+        };
+        defer set.deinit();
+        var cache = try set.cache(gpa);
+        defer cache.deinit(gpa);
+        var out = try set.patterns(gpa);
+        defer out.deinit(gpa);
+        _ = try set.matches(&cache, .of(haystack), &out);
+        countPath(cache.last);
+        try testing.expect(out.bits.eql(want.bits));
+        const whole: Set.Input = .{ .haystack = haystack, .span = .{ .start = 0, .end = haystack.len }, .whole = true };
+        _ = try set.matches(&cache, whole, &out);
+        countPath(cache.last);
+        try testing.expect(out.bits.eql(want_whole.bits));
+        const m = try set.first(&cache, .of(haystack));
+        countPath(cache.last);
+        try testing.expectEqual(want_first == null, m == null);
+        if (m) |got| {
+            try testing.expectEqual(want_first.?.span, got.span);
+            try testing.expectEqual(first_index.?, set.pattern(got).raw());
+        }
+        try testing.expectEqual(want.count() > 0, try set.isMatch(&cache, .of(haystack)));
+        countPath(cache.last);
+        _ = try set.matches(&cache, .of(long.items), &out);
+        countPath(cache.last);
+        if (long_want) |w| try testing.expect(out.bits.eql(w)) else long_want = try out.bits.clone(gpa);
+    }
+}
 
 fn anySet(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -131,8 +191,13 @@ fn anySet(_: void, case: *shakedown.Case) !void {
     defer whole_out.deinit(case.gpa);
     const whole: Set.Input = .{ .haystack = haystack, .span = .{ .start = 0, .end = haystack.len }, .whole = true };
     const any = try set.matches(&cache, .of(haystack), &out);
+    countPath(cache.last);
     _ = try set.matches(&cache, whole, &whole_out);
+    countPath(cache.last);
     try testing.expectEqual(any, try set.isMatch(&cache, .of(haystack)));
+    const set_first = try set.first(&cache, .of(haystack));
+    countPath(cache.last);
+    try sameOnEveryPath(a, patterns, syntax, haystack, &out, &whole_out, set_first, if (set_first) |m| set.pattern(m).raw() else null);
     reached.sets += 1;
     if (syntax.dialect == .ecmascript) reached.ecma += 1;
     if (any) reached.matched += 1;
@@ -187,4 +252,5 @@ test "fuzz: a set's matches are each pattern's own, and its first is the alterna
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
     try testing.expect(reached.sets > 2500 and reached.matched > 1000 and reached.firsts > 1000 and reached.wholes > 300 and reached.ecma > 1000);
+    try testing.expect(reached.lazy_dfa > 5000 and reached.fell_back > 50 and reached.pikevm > 5000);
 }
