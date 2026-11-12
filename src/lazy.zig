@@ -924,8 +924,9 @@ pub const Combined = struct {
     }
 };
 
-/// `main` with the lanes of every lookaround `p` streams in it, each read forward.
-pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan) Allocator.Error!Combined {
+/// `main` with the lanes of every lookaround `p` streams in the scan of `of` (a lookaround's row,
+/// or null for the main expression), read the way `scan` says.
+pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan, of: ?u32, scan: oracle.Scan) Allocator.Error!Combined {
     var states: std.ArrayList(Nfa.State) = .empty;
     defer states.deinit(gpa);
     var transitions: std.ArrayList(Nfa.Transition) = .empty;
@@ -941,9 +942,10 @@ pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan) Allocato
     try append(gpa, &states, &transitions, &alternatives, main, null);
     // Deepest first: an inner lane's accept settles before an outer one's check reads it.
     var row = p.rows.len;
-    while (row > 0) {
+    const lowest: usize = if (of) |r| r + 1 else 0;
+    while (row > lowest) {
         row -= 1;
-        if (p.rows[row].scan != .forward or !p.streamedIn(@intCast(row), null)) continue;
+        if (p.rows[row].scan != scan or !p.streamedIn(@intCast(row), of)) continue;
         const lane = &p.rows[row].nfa;
         const shift: u32 = @intCast(states.items.len);
         try append(gpa, &states, &transitions, &alternatives, lane, @intCast(row));
@@ -1012,6 +1014,51 @@ pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan) Allocato
         .too_many_columns = too_many,
         .main_states = @intCast(main.states.len),
     };
+}
+
+/// The smallest store `buildLook` accepts for `nfa`: room for the fewest states a search needs,
+/// and keys for the state left across a clear and the one built.
+pub fn smallest(nfa: *const Nfa, direction: Direction, kind: Kind, look: ?LookInfo) ?usize {
+    const d = buildLook(nfa, std.math.maxInt(u32), direction, kind, look) orelse return null;
+    const per_state = d.stride * @sizeOf(u32) + @sizeOf(Rec) + 4 * @sizeOf(u32);
+    const keys = 2 * (nfa.states.len + nfa.patterns) * @sizeOf(Key);
+    return 2 * @max(min_states * per_state, keys);
+}
+
+/// Every position where `nfa` accepts, scanned from the haystack's edge the way `d` reads
+/// (forward from its start, of the all kind, so no thread is dropped; or backward from its
+/// end), each given to `sink.accept(at)`, which says whether to stop: a lookaround's row, or
+/// whether the main expression matches at all. A lookaround's lanes (`d.look`) are folded into
+/// the states and its stored rows read as columns from `cols`. Whether the sink stopped it.
+pub fn scanAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, haystack: []const u8, cols: ?Columns, sink: anytype) Error!bool {
+    aegis.assert.invariant(d.direction == .reverse or d.kind == .all, "a forward scan of every accept is of the all kind");
+    aegis.assert.invariant(c.threads == d.threads and c.rows.len == @as(usize, d.states) * d.stride, "a cache scans the automaton it was made for");
+    c.visited = 0;
+    const n = haystack.len;
+    var s = try startOf(nfa, d, c, d.start, false);
+    var step: usize = 0;
+    while (step < n) : (step += 1) {
+        if (s == dead) return false;
+        // Forward the transition reads the byte at the position it closes; backward the one
+        // before it.
+        const at = if (d.direction == .forward) step else n - step;
+        const byte = if (d.direction == .forward) haystack[at] else haystack[at - 1];
+        const class = d.classes[byte];
+        if (d.quit == class) return error.Quit;
+        c.visited += 1;
+        c.bytes_since += 1;
+        const col = columnAt(d, cols, at);
+        const t = c.rows[index(d, s, class, col)];
+        s = if (t != unknown) t else try next(nfa, d, c, s, byte, col);
+        if (c.recs[s].match and sink.accept(at)) return true;
+    }
+    if (s == dead) return false;
+    // The last position, the far edge, closed by the transition on the haystack's end.
+    const last: usize = if (d.direction == .forward) n else 0;
+    const col = columnAt(d, cols, last);
+    const t = c.rows[index(d, s, d.ends - 1, col)];
+    s = if (t != unknown) t else try next(nfa, d, c, s, null, col);
+    return c.recs[s].match and sink.accept(last);
 }
 
 /// Appends `nfa`'s states, each id moved past those already there; with `lane`, its match

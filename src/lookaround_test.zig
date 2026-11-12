@@ -13,6 +13,7 @@ const parse_mod = @import("syntax/parse.zig");
 const translate_mod = @import("hir/translate.zig");
 const spec = @import("testing/ecma.zig");
 const grammar = @import("testing/grammar.zig");
+const lazy = @import("lazy.zig");
 const testing = std.testing;
 const fuzzing = @import("builtin").fuzz;
 const gpa = testing.allocator;
@@ -46,7 +47,7 @@ test "lookahead and lookbehind, positive and negative, nested, through every sea
         try testing.expectEqual(case.want, try re.find(&c, .of(case.haystack)));
         try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, c.last);
         try testing.expectEqual(case.want != null, try re.isMatch(&c, case.haystack));
-        try testing.expectEqual(Regex.Cache.Path.lookaround_scan, c.last);
+        try testing.expectEqual(Regex.Cache.Path.lookaround_scan_lazy_dfa, c.last);
     }
     // Every match in turn: the rows built once for the haystack.
     var re = try Regex.compile(gpa, .init("(?<=,)\\w+"), .{ .syntax = ecma });
@@ -220,6 +221,12 @@ var reached: struct {
     pikevm: usize = 0,
     columns: usize = 0,
     spans: usize = 0,
+    /// How is-match was answered, and how the rows were built.
+    scan_lazy_dfa: usize = 0,
+    scan_fell_back: usize = 0,
+    scan_nfa: usize = 0,
+    rows_lazy_dfa: usize = 0,
+    rows_fell_back: usize = 0,
 } = .{};
 
 fn anySearch(_: void, case: *shakedown.Case) !void {
@@ -240,6 +247,22 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
         error.TooLarge => return,
         else => return err,
     };
+    // One case in two again on the smallest store a lazy DFA accepts, find's or is-match's, over a
+    // longer haystack: it clears and gives up, and the searches that take over are checked too.
+    const tight = shakedown.gen.boolean(s);
+    if (tight) {
+        const l = &re.look.?;
+        const target = if (shakedown.gen.boolean(s)) &l.stream_combined else &l.match_dfa.?.combined;
+        const forward = target == &l.stream_combined or l.match_scan == .forward;
+        const store = lazy.smallest(&target.nfa, if (forward) .forward else .reverse, if (target == &l.stream_combined) .leftmost_first else if (forward) .all else .leftmost_first, target.info());
+        if (store) |bytes| {
+            re.deinit();
+            re = Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(bytes) } }) catch |err| switch (err) {
+                error.TooLarge => return,
+                else => return err,
+            };
+        }
+    }
     if (re.look.?.bodies.len > 0) for (re.look.?.bodies) |b| if (b != null) {
         reached.inside += 1;
         break;
@@ -248,7 +271,7 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     var c = try re.cache(case.gpa);
     defer c.deinit(case.gpa);
     var hay: std.ArrayList(u8) = .empty;
-    for (0..shakedown.gen.intRange(s, usize, 0, 8)) |_| try hay.append(a, "ab \n"[shakedown.gen.intRange(s, usize, 0, 3)]);
+    for (0..shakedown.gen.intRange(s, usize, 0, if (tight) 40 else 8)) |_| try hay.append(a, "ab \n"[shakedown.gen.intRange(s, usize, 0, 3)]);
     const want = spec.exec(a, &hir, hay.items, 50_000) catch |err| switch (err) {
         error.Budget => {
             reached.budget += 1;
@@ -264,25 +287,19 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
         var ac = try alone.cache(case.gpa);
         defer ac.deinit(case.gpa);
         try spanAgrees(&re, &c, &alone, &ac, hay.items, shakedown.gen.intRange(s, usize, 1, hay.items.len));
-        // A store of the fewest states over a longer haystack clears and gives up: the PikeVM
-        // takes over, and the match is the same.
-        var small = Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(1600) } }) catch |err| switch (err) {
-            error.TooLarge => return,
-            else => return err,
-        };
-        defer small.deinit();
-        var sc = try small.cache(case.gpa);
-        defer sc.deinit(case.gpa);
-        var long: std.ArrayList(u8) = .empty;
-        for (0..30) |_| try long.appendSlice(a, hay.items);
-        const want_long = try alone.find(&ac, .of(long.items));
-        try testing.expectEqual(want_long, try small.find(&sc, .of(long.items)));
-        if (sc.last == .lookaround_lazy_dfa_fell_back) reached.fell_back += 1;
     }
     // Find streams the main expression's lookbehinds beside the PikeVM.
     if (re.look.?.stream.stored < re.look.?.search.stored) reached.find_streaming += 1;
     errdefer std.debug.print("/{s}/ on {any}: ECMA-262 {any}\n", .{ text.items, hay.items, want });
     try testing.expectEqual(want != null, try re.isMatch(&c, hay.items));
+    switch (c.last) {
+        .lookaround_scan_lazy_dfa => reached.scan_lazy_dfa += 1,
+        .lookaround_scan_fell_back => reached.scan_fell_back += 1,
+        .lookaround_scan => reached.scan_nfa += 1,
+        else => unreachable,
+    }
+    reached.rows_lazy_dfa += c.rows_lazy_dfa;
+    reached.rows_fell_back += c.rows_fell_back;
     const groups = try a.alloc(?Regex.Span, re.captureCount());
     const found = try re.captures(&c, .of(hay.items), groups);
     try testing.expectEqual(want != null, found);
@@ -320,5 +337,6 @@ test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matche
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
     try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.inside > 200 and reached.scans_storing > 100 and reached.find_streaming > 300);
-    try testing.expect(reached.lazy_dfa > 500 and reached.spans > 1000 and reached.columns > 300);
+    try testing.expect(reached.lazy_dfa > 500 and reached.spans > 1000 and reached.columns > 300 and reached.fell_back > 20);
+    try testing.expect(reached.scan_lazy_dfa > 500 and reached.scan_fell_back > 5 and reached.rows_lazy_dfa > 500 and reached.rows_fell_back > 5);
 }

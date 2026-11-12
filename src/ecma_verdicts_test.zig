@@ -69,6 +69,8 @@ const Tally = struct {
     path_lookaround_lazy_dfa: usize = 0,
     path_lookaround_lazy_dfa_fell_back: usize = 0,
     path_pikevm_columns: usize = 0,
+    path_lookaround_scan_lazy_dfa: usize = 0,
+    path_lookaround_scan_fell_back: usize = 0,
     no_lazy_dfa: usize = 0,
     /// Each case's match found again by `find`, its start each way (`Regex.Cache.Start`), and
     /// the same span as the captures' group 0.
@@ -174,6 +176,8 @@ test "V8's verdicts, through the ECMAScript dialect" {
             .lookaround_lazy_dfa => tally.path_lookaround_lazy_dfa += 1,
             .lookaround_lazy_dfa_fell_back => tally.path_lookaround_lazy_dfa_fell_back += 1,
             .pikevm_columns => tally.path_pikevm_columns += 1,
+            .lookaround_scan_lazy_dfa => tally.path_lookaround_scan_lazy_dfa += 1,
+            .lookaround_scan_fell_back => tally.path_lookaround_scan_fell_back += 1,
         }
         const span = (try re.find(cache, .of(case.haystack)));
         if (found != (span != null) or (found and !std.meta.eql(groups[0].?, span.?))) {

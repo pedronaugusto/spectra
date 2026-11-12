@@ -172,7 +172,10 @@ is the lazy DFA's: its automaton is the main expression with each streamed looka
 transitions are keyed by the byte's class and the column, the bits of the up to four stored rows its
 checks read; a search starting past the haystack's start runs the lanes alone up to it. Past four
 columns the PikeVM answers (`Cache.Path.pikevm_columns`); where the DFA quits or gives up, the PikeVM
-searches the span. The start and the groups are the PikeVM's over the span cut at the end. The reverse
+searches the span. The start and the groups are the PikeVM's over the span cut at the end. The rows
+and `isMatch`'s scan run on lazy DFAs too, in a mode that reports every accept (forward of the all
+kind, or reversed), each row's on a share of `Limits.lazy_dfa` reading the rows inside it as columns,
+`isMatch`'s with its streamed lanes folded in; where one quits or gives up, the NFA's lanes. The reverse
 lazy DFA, the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
 says whether a pattern is valid whether or not spectra runs it.
 

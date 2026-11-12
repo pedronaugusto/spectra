@@ -14,7 +14,8 @@ follow [Semantic Versioning](https://semver.org/).
   way. `find`, `captures` and `findAll` run the PikeVM over rows stored before a byte is read; `isMatch` scans the
   main expression with its lookarounds streamed; `find` and `captures` stream the main expression's lookbehinds
   beside the PikeVM; the lazy DFA finds where the match ends, its streamed lookarounds folded into its states and up
-  to four stored rows read as columns (`Cache.Path.lookaround_lazy_dfa`, `pikevm_columns` past four).
+  to four stored rows read as columns (`Cache.Path.lookaround_lazy_dfa`, `pikevm_columns` past four); the rows
+  and `isMatch`'s scan run on lazy DFAs that report every accept (`lookaround_scan_lazy_dfa`).
   `Limits.oracle` bounds the stored rows; a haystack past it is
   refused with `error.HaystackTooLong`, and `Regex.longestHaystack` says the limit. Groups inside a positive
   lookaround are its first success's, rebuilt after the match by one anchored run of its body read its way (a new

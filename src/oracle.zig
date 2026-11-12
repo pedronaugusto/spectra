@@ -294,6 +294,11 @@ pub const Cache = struct {
         return word >> @intCast(at % @bitSizeOf(usize)) & 1 != 0;
     }
 
+    /// Writes stored row `slot` as holding at `at`: a row's scan, NFA or lazy DFA.
+    pub fn mark(c: *Cache, slot: u32, at: usize) void {
+        c.set(slot, at);
+    }
+
     fn set(c: *Cache, slot: u32, at: usize) void {
         c.bits[slot * c.stride + at / @bitSizeOf(usize)] |= @as(usize, 1) << @intCast(at % @bitSizeOf(usize));
     }
@@ -388,7 +393,17 @@ fn stepLane(c: *Cache, nfa: *const Nfa, lane: *Lane, byte: u8) void {
 /// does not count, as the searches pass such a match over.
 pub fn isMatch(p: *const Plan, c: *Cache, main: *const Nfa, scan: Scan, haystack: []const u8, splits: bool) Error!bool {
     try fill(p, c, haystack);
+    return scanMain(p, c, main, scan, haystack, splits);
+}
+
+/// `isMatch`'s scan of the main expression, the stored rows built already.
+pub fn scanMain(p: *const Plan, c: *Cache, main: *const Nfa, scan: Scan, haystack: []const u8, splits: bool) bool {
     return scanLanes(p, c, .{ .main = .{ .nfa = main, .splits = splits } }, scan, haystack);
+}
+
+/// Whether, with `splits`, an accept at `at` counts: not inside a code point's encoding.
+pub fn counts(haystack: []const u8, at: usize, splits: bool) bool {
+    return !splits or isBoundary(haystack, at);
 }
 
 /// The longest haystack whose stored rows for `p` fit `capacity` bytes: null where `p` stores
@@ -407,6 +422,18 @@ fn isBoundary(haystack: []const u8, at: usize) bool {
 /// Builds every stored row of `p` over `haystack`, innermost first, with their streams;
 /// refused before a byte is read where the stored rows would pass the store.
 pub fn fill(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
+    try prepare(p, c, haystack);
+    var row = p.rows.len;
+    while (row > 0) {
+        row -= 1;
+        if (p.rows[row].slot != null) scanRow(p, c, @intCast(row), haystack);
+    }
+}
+
+/// The store sized and emptied for `haystack`'s stored rows, before any is built (innermost
+/// first, by `scanRow` or a lazy DFA's scan writing `mark`); refused before a byte is read where
+/// they would pass it.
+pub fn prepare(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
     const positions = haystack.len + 1;
     const stride = std.math.divCeil(usize, positions, @bitSizeOf(usize)) catch unreachable;
     if (p.stored > 0 and (std.math.mul(usize, stride, p.stored) catch return error.HaystackTooLong) > c.bits.len) return error.HaystackTooLong;
@@ -417,16 +444,11 @@ pub fn fill(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
     c.runner_next = std.math.maxInt(usize);
     c.begin(p, 0);
     @memset(c.bits[0 .. stride * p.stored], 0);
-    var row = p.rows.len;
-    while (row > 0) {
-        row -= 1;
-        if (p.rows[row].slot != null) scanRow(p, c, @intCast(row), haystack);
-    }
 }
 
 /// One stored row: the scan of its automaton, with every lookaround streamed in it as a lane
 /// before it, writing a 1 at every position it accepts.
-fn scanRow(p: *const Plan, c: *Cache, row: u32, haystack: []const u8) void {
+pub fn scanRow(p: *const Plan, c: *Cache, row: u32, haystack: []const u8) void {
     _ = scanLanes(p, c, .{ .row = row }, p.rows[row].scan, haystack);
 }
 
