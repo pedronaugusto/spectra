@@ -29,7 +29,6 @@ pub fn write(s: anytype, out: *std.ArrayList(u8), a: std.mem.Allocator, depth: u
     }
 }
 
-
 /// A pattern of the ECMAScript dialect from the grammar above with lookarounds among its atoms:
 /// lookahead and lookbehind, positive and negative, nested, with groups inside them and around
 /// them, quantified or not.

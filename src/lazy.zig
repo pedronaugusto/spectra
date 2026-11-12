@@ -462,7 +462,7 @@ pub const Cache = struct {
 };
 
 fn hashOf(context: Context, match: bool, keys: []const Key, seeds: usize) u32 {
-    const seed = (@as(u64, @intFromEnum(context)) * 2 + @intFromBool(match)) * 0x1_0000_0000 + seeds;
+    const seed = (@as(u64, @backingInt(context)) * 2 + @intFromBool(match)) * 0x1_0000_0000 + seeds;
     return @truncate(std.hash.Wyhash.hash(seed, std.mem.sliceAsBytes(keys)));
 }
 
@@ -705,7 +705,7 @@ fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored:
 }
 
 fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored: bool) Error!u32 {
-    const which = @as(usize, @intFromEnum(context)) * 2 + @intFromBool(anchored);
+    const which = @as(usize, @backingInt(context)) * 2 + @intFromBool(anchored);
     if (c.starts[which] != unknown) return c.starts[which];
     const seed: Key = (if (anchored) nfa.start_anchored else nfa.start_unanchored).raw();
     const id = if (d.look) |l| blk: {

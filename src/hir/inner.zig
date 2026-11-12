@@ -78,7 +78,7 @@ pub fn prefix(arena: Allocator, hir: *const Hir, kids: []const Hir.Index, at: us
     @memcpy(children[0..hir.children.len], hir.children);
     @memcpy(children[hir.children.len..], kids[0..at]);
     nodes[hir.nodes.len] = .{ .concat = .{ .start = @intCast(hir.children.len), .len = @intCast(at) } };
-    return .{ .nodes = nodes, .children = children, .root = @enumFromInt(hir.nodes.len), .captures = hir.captures };
+    return .{ .nodes = nodes, .children = children, .root = @fromBackingInt(@intCast(hir.nodes.len)), .captures = hir.captures };
 }
 
 /// Whether, split before child `at` with X's matches starting with `lits`, the first

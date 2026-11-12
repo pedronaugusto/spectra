@@ -93,7 +93,6 @@ pub const Plan = struct {
             at = r.parent orelse return false;
         }
     }
-
 };
 
 /// Which rows a plan stores and which it streams.

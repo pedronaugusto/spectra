@@ -814,7 +814,7 @@ fn anyPrefilter(_: void, case: *shakedown.Case) !void {
         },
     };
     try testing.expectEqual(want, p.find(h, start, end));
-    reached_prefilter[@intFromEnum(p)] += 1;
+    reached_prefilter[@backingInt(p)] += 1;
 }
 
 var reached_prefilter: [4]usize = .{ 0, 0, 0, 0 };

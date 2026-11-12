@@ -880,7 +880,6 @@ pub const SearchError = error{HaystackTooLong};
 /// The kinds of search, which may store different rows.
 pub const Search = enum { is_match, find, captures, find_all };
 
-
 /// Whether some match is in `haystack`. `error.HaystackTooLong` only as `SearchError` says,
 /// never otherwise.
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!bool {

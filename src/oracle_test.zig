@@ -134,7 +134,7 @@ fn anyRows(_: void, case: *shakedown.Case) !void {
                 continue;
             };
             for (0..hay.items.len + 1) |at| {
-                const want = spec.lookaroundHolds(a, &hir, @enumFromInt(i), hay.items, at, 20_000) catch |err| switch (err) {
+                const want = spec.lookaroundHolds(a, &hir, @fromBackingInt(@intCast(i)), hay.items, at, 20_000) catch |err| switch (err) {
                     error.Budget => {
                         reached.budget += 1;
                         continue;
