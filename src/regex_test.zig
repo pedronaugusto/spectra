@@ -128,8 +128,8 @@ test "a refused pattern says where and why" {
     try testing.expectError(error.Invalid, Regex.compile(gpa, .init("a(b"), .{ .diagnostic = &d }));
     try testing.expect(d.reason != .none);
     d = .{};
-    try testing.expectError(error.Unsupported, Regex.compile(gpa, .init("a(?=b)"), .{ .syntax = ecma, .diagnostic = &d }));
-    try testing.expectEqual(Regex.Diagnostic{ .span = .{ .start = 0, .end = 6 }, .reason = .unsupported_lookaround }, d);
+    try testing.expectError(error.Unsupported, Regex.compile(gpa, .init("(a)\\1"), .{ .syntax = ecma, .diagnostic = &d }));
+    try testing.expectEqual(Regex.Diagnostic{ .span = .{ .start = 3, .end = 5 }, .reason = .unsupported_backreference }, d);
     d = .{};
     try testing.expectError(error.TooLarge, Regex.compile(gpa, .init("(?:\\pL{1000}){1000}"), .{ .diagnostic = &d }));
 }

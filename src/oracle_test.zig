@@ -30,7 +30,7 @@ fn rowText(a: std.mem.Allocator, pattern: []const u8, haystack: []const u8, row:
     const hir = try hirOf(a, pattern);
     var p = try oracle.plan(gpa, &hir, .{}, null);
     defer p.deinit(gpa);
-    var c = try oracle.Cache.init(gpa, &p, 4096);
+    var c = try oracle.Cache.init(gpa, &p, null, 4096);
     defer c.deinit(gpa);
     try oracle.fill(&p, &c, haystack);
     const out = try a.alloc(u8, haystack.len + 1);
@@ -87,7 +87,7 @@ test "rows are refused before a byte is read where they would pass the store" {
     var p = try oracle.plan(gpa, &hir, .{}, null);
     defer p.deinit(gpa);
     // Two rows of one word each: 64 positions, a haystack of 63 bytes.
-    var c = try oracle.Cache.init(gpa, &p, 2 * @sizeOf(usize));
+    var c = try oracle.Cache.init(gpa, &p, null, 2 * @sizeOf(usize));
     defer c.deinit(gpa);
     try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), c.longest(&p));
     const long: [@bitSizeOf(usize) - 1]u8 = @splat('a');
@@ -116,7 +116,7 @@ fn anyRows(_: void, case: *shakedown.Case) !void {
         else => return err,
     };
     defer p.deinit(case.gpa);
-    var c = try oracle.Cache.init(case.gpa, &p, 1 << 12);
+    var c = try oracle.Cache.init(case.gpa, &p, null, 1 << 12);
     defer c.deinit(case.gpa);
     try oracle.fill(&p, &c, hay.items);
     reached.patterns += 1;

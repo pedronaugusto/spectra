@@ -85,9 +85,16 @@ std.debug.assert(d.span.start == 3 and d.span.end == 5);
   (ECMA-262 2025: `u`, `v` with class set operations and `\q{}`, `i`, `m`, `s`, modifiers, named groups; Annex B's
   grammar without `u` or `v`). `ecmascript.validate` says whether a pattern is valid ECMA-262 whatever spectra runs.
 - **Matching.** Leftmost-first, as Rust's `regex` and backtracking engines report it: is-match, find, captures and
-  every match in turn, over a span of the haystack with assertions seeing the whole of it, anchored or not.
-- **Refused by name.** Backreferences (not regular); lookaround, for now (lookahead and lookbehind come before 0.1.0,
-  by the method of Barrière and Pit-Claudel, PLDI 2024); in the ECMAScript dialect without `u` or `v`, half of a code
+  every match in turn, over a span of the haystack with assertions seeing the whole of it, anchored or not. Sets of
+  patterns searched in one pass (`Set`), and a stepping automaton for walking a trie or a path (`Automaton`).
+- **Lookaround** in the ECMAScript dialect: lookahead and lookbehind, positive and negative, nested, with any body,
+  in linear time by the method of Barrière and Pit-Claudel ("Linear Matching of JavaScript Regular Expressions", PLDI
+  2024): each lookaround's truth at every position is built before the search reads it, or computed beside it where
+  the scan reads the haystack the lookaround's way. Rows that must be stored take a bit per position each, bounded by
+  `Limits.oracle`: a longer haystack is refused by name (`error.HaystackTooLong`, said up front by
+  `Regex.longestHaystack`), never searched slowly. For now a capture group inside a positive lookaround is refused,
+  and such patterns run on the PikeVM.
+- **Refused by name.** Backreferences (not regular); in the ECMAScript dialect without `u` or `v`, half of a code
   point past U+FFFF named alone (spectra reads UTF-8, not UTF-16 code units); `v`'s properties of strings. Every
   limit (`Limits`: pattern length, nesting, repetition counts, automaton size, cache size) refuses past it, before
   allocating.
@@ -99,8 +106,8 @@ std.debug.assert(d.span.start == 3 and d.span.end == 5);
   leftmost-first engine; `Regex.findAll`'s documentation shows the case. Memory is fixed at compile by `Limits`.
 - **Differences from V8** in the ECMAScript dialect: three cases of V8's verdicts where V8 reads UTF-16 code units
   and spectra reads code points.
-- **Not yet.** Sets of patterns in one pass, dense DFAs built ahead, compiling patterns to tables at build time,
-  leftmost-longest matching, replacement.
+- **Not yet.** Dense DFAs built ahead, compiling patterns to tables at build time, leftmost-longest matching,
+  replacement and split.
 
 ## Stability
 

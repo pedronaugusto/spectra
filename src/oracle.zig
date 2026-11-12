@@ -196,11 +196,12 @@ pub const Cache = struct {
     /// States entered by the last `fill`, over every row.
     visited: usize = 0,
 
-    /// A store of `capacity` bytes for the stored rows, and a lane for each lookaround.
-    pub fn init(gpa: Allocator, p: *const Plan, capacity: usize) Allocator.Error!Cache {
+    /// A store of `capacity` bytes for the stored rows, a lane for each lookaround, and one for
+    /// `main` where a scan of the main expression runs on it (`isMatch`).
+    pub fn init(gpa: Allocator, p: *const Plan, main: ?*const Nfa, capacity: usize) Allocator.Error!Cache {
         const bits = try gpa.alloc(usize, capacity / @sizeOf(usize));
         errdefer gpa.free(bits);
-        const lanes = try gpa.alloc(Lane, p.rows.len);
+        const lanes = try gpa.alloc(Lane, p.rows.len + 1);
         var made: usize = 0;
         errdefer {
             for (lanes[0..made]) |*l| {
@@ -209,20 +210,38 @@ pub const Cache = struct {
             }
             gpa.free(lanes);
         }
-        for (lanes, p.rows) |*l, r| {
-            var seeds: SparseSet = try .init(gpa, r.nfa.states.len);
+        for (lanes, 0..) |*l, i| {
+            const states = if (i < p.rows.len) p.rows[i].nfa.states.len else if (main) |m| m.states.len else 0;
+            var seeds: SparseSet = try .init(gpa, states);
             errdefer seeds.deinit(gpa);
-            l.* = .{ .seeds = seeds, .closed = try .init(gpa, r.nfa.states.len) };
+            l.* = .{ .seeds = seeds, .closed = try .init(gpa, states) };
             made += 1;
         }
         var streams = try std.DynamicBitSetUnmanaged.initEmpty(gpa, p.rows.len);
         errdefer streams.deinit(gpa);
-        const order = try gpa.alloc(u32, p.rows.len);
+        const order = try gpa.alloc(u32, p.rows.len + 1);
         errdefer gpa.free(order);
         var stack_len: usize = 1;
         for (p.rows) |r| stack_len = @max(stack_len, r.nfa.states.len + r.nfa.alternatives.len + 1);
+        if (main) |m| stack_len = @max(stack_len, m.states.len + m.alternatives.len + 1);
         const stack = try gpa.alloc(Nfa.StateId, stack_len);
         return .{ .bits = bits, .lanes = lanes, .streams = streams, .order = order, .stack = stack };
+    }
+
+    /// The bytes `init` allocates for `p`, `main` and `capacity`: what `Limits.cache` bounds.
+    pub fn bytes(p: *const Plan, main: ?*const Nfa, capacity: usize) usize {
+        var total = capacity / @sizeOf(usize) * @sizeOf(usize);
+        var stack_len: usize = 1;
+        for (p.rows) |r| {
+            total += 2 * r.nfa.states.len * SparseSet.bytesPer;
+            stack_len = @max(stack_len, r.nfa.states.len + r.nfa.alternatives.len + 1);
+        }
+        if (main) |m| {
+            total += 2 * m.states.len * SparseSet.bytesPer;
+            stack_len = @max(stack_len, m.states.len + m.alternatives.len + 1);
+        }
+        total += (p.rows.len + 1) * @sizeOf(Lane) + (p.rows.len + 63) / 64 * 8 + (p.rows.len + 1) * @sizeOf(u32);
+        return total + stack_len * @sizeOf(Nfa.StateId);
     }
 
     pub fn deinit(c: *Cache, gpa: Allocator) void {
@@ -262,7 +281,36 @@ pub const Cache = struct {
     fn truth(c: *const Cache, p: *const Plan, row: u32, at: usize) bool {
         return if (p.rows[row].slot) |slot| c.holds(slot, at) else c.streams.isSet(row);
     }
+
+    /// Whether lookaround `row`, which `p` stores, holds at `at`: for an engine's `check`.
+    pub fn stored(c: *const Cache, p: *const Plan, row: u32, at: usize) bool {
+        const slot = p.rows[row].slot orelse aegis.assert.never("an engine reads only stored rows");
+        return c.holds(slot, at);
+    }
 };
+
+/// Whether some match of the main expression is in `haystack`: the stored rows built, then one
+/// scan of `main` (`.*?` and the main expression, read the way `scan` says: forward, or backward
+/// over the reversed one) with the lookarounds streamed in it, stopping at its first accept.
+/// With `splits` (UTF-8, and a match may be empty), an accept inside a code point's encoding
+/// does not count, as the searches pass such a match over.
+pub fn isMatch(p: *const Plan, c: *Cache, main: *const Nfa, scan: Scan, haystack: []const u8, splits: bool) Error!bool {
+    try fill(p, c, haystack);
+    return scanLanes(p, c, .{ .main = .{ .nfa = main, .splits = splits } }, scan, haystack);
+}
+
+/// The longest haystack whose stored rows for `p` fit `capacity` bytes: null where `p` stores
+/// none, so every haystack does.
+pub fn longestFor(p: *const Plan, capacity: usize) ?usize {
+    if (p.stored == 0) return null;
+    const words = capacity / @sizeOf(usize) / p.stored;
+    return if (words == 0) 0 else words * @bitSizeOf(usize) - 1;
+}
+
+fn isBoundary(haystack: []const u8, at: usize) bool {
+    if (at >= haystack.len) return at == haystack.len;
+    return haystack[at] < 0x80 or haystack[at] >= 0xc0;
+}
 
 /// Builds every stored row of `p` over `haystack`, innermost first, with their streams;
 /// refused before a byte is read where the stored rows would pass the store.
@@ -284,32 +332,51 @@ pub fn fill(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
 /// One stored row: the scan of its automaton, with every lookaround streamed in it as a lane
 /// before it, writing a 1 at every position it accepts.
 fn scanRow(p: *const Plan, c: *Cache, row: u32, haystack: []const u8) void {
-    // Lanes deepest first: a higher number is never an ancestor of a lower one.
+    _ = scanLanes(p, c, .{ .row = row }, p.rows[row].scan, haystack);
+}
+
+/// What a scan is for: a stored row, written at every accept, or the main expression, whose
+/// first accept ends the scan.
+const Target = union(enum) { row: u32, main: struct { nfa: *const Nfa, splits: bool } };
+
+/// A scan of `target`'s automaton, read the way `scan` says, with each lookaround streamed in it
+/// as a lane before it. For the main expression, whether it accepted anywhere.
+fn scanLanes(p: *const Plan, c: *Cache, target: Target, scan: Scan, haystack: []const u8) bool {
+    // Lanes deepest first: a higher number is never an ancestor of a lower one. The main lane is
+    // number `p.rows.len`.
+    const of: ?u32 = switch (target) {
+        .row => |r| r,
+        .main => null,
+    };
+    const self: u32 = switch (target) {
+        .row => |r| r,
+        .main => @intCast(p.rows.len),
+    };
     var count: usize = 0;
     var k = p.rows.len;
-    while (k > row + 1) {
+    const lowest: usize = if (of) |r| r + 1 else 0;
+    while (k > lowest) {
         k -= 1;
-        if (p.streamedIn(@intCast(k), row)) {
+        if (p.streamedIn(@intCast(k), of)) {
             c.order[count] = @intCast(k);
             count += 1;
         }
     }
-    c.order[count] = row;
+    c.order[count] = self;
     count += 1;
     const lanes = c.order[0..count];
-    const scan = p.rows[row].scan;
     const visited_before = c.visited;
     for (lanes) |l| c.lanes[l].seeds.len = 0;
     const n = haystack.len;
     var states: usize = 0;
-    for (lanes) |l| states += p.rows[l].nfa.states.len;
+    for (lanes) |l| states += laneNfa(p, target, l).states.len;
     var step: usize = 0;
     while (step <= n) : (step += 1) {
         // Forward the positions go up from 0; backward down from the end.
         const at = if (scan == .forward) step else n - step;
         for (lanes) |l| {
-            const nfa = &p.rows[l].nfa;
-            aegis.assert.invariant(!nfa.loop_checks and p.rows[l].scan == scan, "a scan's lanes are strings-only automata read its way");
+            const nfa = laneNfa(p, target, l);
+            aegis.assert.invariant(!nfa.loop_checks and (l == self or p.rows[l].scan == scan), "a scan's lanes are strings-only automata read its way");
             const lane = &c.lanes[l];
             lane.closed.len = 0;
             // The lazy `.*?` before the body starts a match at every position.
@@ -319,8 +386,9 @@ fn scanRow(p: *const Plan, c: *Cache, row: u32, haystack: []const u8) void {
             for (lane.closed.items()) |key| {
                 if (nfa.state(@fromBackingInt(key)) == .match) accepted = true;
             }
-            if (l == row) {
-                if (accepted) c.set(p.rows[row].slot.?, at);
+            if (l == self) switch (target) {
+                .row => |row| if (accepted) c.set(p.rows[row].slot.?, at),
+                .main => |m| if (accepted and (!m.splits or isBoundary(haystack, at))) return true,
             } else c.streams.setValue(l, accepted);
         }
         // Each lane reads the byte the scan reads next.
@@ -329,24 +397,30 @@ fn scanRow(p: *const Plan, c: *Cache, row: u32, haystack: []const u8) void {
             .backward => if (at > 0) haystack[at - 1] else null,
         };
         for (lanes) |l| {
-            const nfa = &p.rows[l].nfa;
+            const nfa = laneNfa(p, target, l);
             const lane = &c.lanes[l];
             lane.seeds.len = 0;
             const b = unit orelse continue;
             for (lane.closed.items()) |key| {
                 c.visited += 1;
-                const target: ?Nfa.StateId = switch (nfa.state(@fromBackingInt(key))) {
+                const to: ?Nfa.StateId = switch (nfa.state(@fromBackingInt(key))) {
                     .byte_range => |t| if (t.contains(b)) t.next else null,
                     .sparse => |slice| stepSparse(nfa, slice, b),
                     else => null,
                 };
-                if (target) |t| _ = lane.seeds.insert(t.raw());
+                if (to) |t| _ = lane.seeds.insert(t.raw());
             }
         }
     }
     if (std.debug.runtime_safety) {
         aegis.assert.invariant(c.visited - visited_before <= 2 * states * (n + 1), "a scan enters each lane's states at most once per position and step");
     }
+    return false;
+}
+
+fn laneNfa(p: *const Plan, target: Target, lane: u32) *const Nfa {
+    if (lane < p.rows.len) return &p.rows[lane].nfa;
+    return target.main.nfa;
 }
 
 fn stepSparse(nfa: *const Nfa, slice: Nfa.Slice, byte: u8) ?Nfa.StateId {

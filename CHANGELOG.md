@@ -8,13 +8,15 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Lookaround's first phase, not yet searched: the ECMAScript translation keeps lookahead and lookbehind, positive
-  and negative and nested, numbered in preorder, and the oracle builds each one's row (its truth at every position,
-  innermost first, by a scan that writes every match). A lookaround nested the way its parent's scan reads is
-  streamed in that scan, a bit at the position being read, and only the others are stored. A pattern holding one is
-  still refused, by one reason,
-  `unsupported_lookaround`, which replaces `unsupported_lookahead`, `unsupported_lookbehind` and
-  `unsupported_nested_lookaround`.
+- Lookaround in the ECMAScript dialect: lookahead and lookbehind, positive and negative, nested, with any body, by
+  Barrière and Pit-Claudel's oracle method. Each lookaround's row (its truth at every position) is built by a scan
+  that writes every match, innermost first, or streamed beside the scan that queries it where that scan reads its
+  way. `find`, `captures` and `findAll` run the PikeVM over rows stored before a byte is read; `isMatch` scans the
+  main expression with its lookarounds streamed. `Limits.oracle` bounds the stored rows; a haystack past it is
+  refused with `error.HaystackTooLong`, and `Regex.longestHaystack` says the limit. A capture group inside a positive
+  lookaround is refused for now (`unsupported_lookaround`), and a lookaround in a `Set`
+  (`unsupported_lookaround_in_set`). The reasons `unsupported_lookahead`, `unsupported_lookbehind` and
+  `unsupported_nested_lookaround` are gone.
 - `Automaton`, the stepping automaton over a pattern's or a set's forward lazy DFA of the all kind (`Regex.automaton`,
   `Set.automaton`): `start`, `step`, `stepEnd` (whether the bytes so far match, a match being seen one byte late),
   `isMatch`, `isDead` and `patterns`, in a `Cache` of the walker's. `error.Stale` refuses a state built before the

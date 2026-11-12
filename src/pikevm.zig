@@ -15,6 +15,7 @@ const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Nfa = @import("nfa/Nfa.zig");
 const look = @import("nfa/look.zig");
+const oracle = @import("oracle.zig");
 
 pub const Span = struct {
     start: usize,
@@ -157,6 +158,11 @@ pub const Cache = struct {
     visited: usize = 0,
     /// The pattern whose match the last search found: 0 but in a set.
     pattern: u32 = 0,
+    /// Lookaround's stored rows over the haystack being searched, for an automaton with `check`
+    /// states: set by the caller once they are built, read by every `check`.
+    rows: ?Rows = null,
+
+    pub const Rows = struct { plan: *const oracle.Plan, cache: *const oracle.Cache };
 
     /// Allocates what `sizes(nfa)` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, nfa: *const Nfa) Allocator.Error!Cache {
@@ -398,7 +404,13 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                             if (!read) break;
                             id = next;
                         },
-                        .check => aegis.assert.never("the PikeVM answers lookaround once the main expression's phase is in"),
+                        // A lookaround's truth is its position's: every path here sees the same, so
+                        // the futures merged at a state are still one.
+                        .check => |k| {
+                            const rows = cache.rows orelse aegis.assert.never("a search of an automaton with lookaround is given its rows");
+                            if (rows.cache.stored(rows.plan, k.row, at) == k.negated) break;
+                            id = k.next;
+                        },
                     }
                 }
             },

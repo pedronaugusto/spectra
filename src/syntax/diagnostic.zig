@@ -78,8 +78,10 @@ pub const Reason = enum {
     nfa_too_large,
     /// What one search's `Cache` would hold, past `Limits.cache`: many groups in a long pattern.
     cache_too_large,
-    /// ECMAScript's lookahead and lookbehind: refused until the oracle runs them.
+    /// A capture group inside a positive lookaround: refused until its captures are rebuilt.
     unsupported_lookaround,
+    /// A lookaround in a pattern of a `Set`, which searches without lookaround's rows.
+    unsupported_lookaround_in_set,
     /// `ecmascript.validate`'s flags: one not of `dgimsuvy`, one given twice, or `u` with `v`.
     regexp_flag_invalid,
 };

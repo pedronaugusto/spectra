@@ -144,8 +144,25 @@ strategies never rescan.
 ## Refused by name
 
 What cannot be searched in linear time, or is not built yet, is refused at compile with
-`error.Unsupported`, a reason and the construct's span: backreferences, lookaround, and the ECMAScript
-forms spectra does not run. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
+`error.Unsupported`, a reason and the construct's span: backreferences, a capture group inside a positive
+lookaround (until its captures are rebuilt), a lookaround in a `Set`, and the ECMAScript forms spectra
+does not run.
+
+## Lookaround
+
+ECMAScript's lookarounds run by the oracle method of Barrière and Pit-Claudel (PLDI 2024, §4.3 and
+§4.4; `oracle.zig`). A lookaround's truth at a position depends on the position alone, so a `check`
+state that reads it keeps the uniform futures every linear engine relies on. Each lookaround's **row**,
+its truth at every position, is built by a scan that writes every accept and never stops: forward over
+`.*?body` for a lookbehind, backward over `.*?rev(body)` for a lookahead, on strings-only automata.
+A lookaround read the same way as the scan that queries it is **streamed**, its automaton a lane in
+lockstep with that scan; one read the other way is **stored**, built first, innermost first. `find`,
+`captures` and `findAll` store every row the main expression queries and run the PikeVM over the main
+automaton; `isMatch` scans the strings-only main expression the way that streams most of its
+lookarounds (all of zod's patterns read backward and store nothing). Stored rows take a bit per
+position each, within `Limits.oracle`; a haystack past it is refused before a byte is read
+(`error.HaystackTooLong`, `Regex.longestHaystack`). The lazy DFAs, the backtracker, the one-pass DFA
+and the literal strategies do not run such patterns yet. `ecmascript.validate` reads the whole ECMA-262 grammar, these included, and
 says whether a pattern is valid whether or not spectra runs it.
 
 ## CPU dispatch
@@ -183,6 +200,7 @@ and Aho-Corasick need only the baseline.
 
 ## Not built yet
 
-Lookaround, sets, the stepping automaton interface, leftmost-longest matching, replacement templates,
-the dense DFA (`Limits.dense_dfa` is reserved for it) and the build step that writes dense DFAs as a
-Zig module. Until then each is absent, and a pattern that needs one is refused by name.
+Captures inside positive lookarounds, lookaround on the lazy DFAs, leftmost-longest matching,
+replacement and split, the dense DFA (`Limits.dense_dfa` is reserved for it) and the build step that
+writes dense DFAs as a Zig module. Until then each is absent, and a pattern that needs one is refused
+by name.

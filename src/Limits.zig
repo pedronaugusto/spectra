@@ -30,5 +30,9 @@ onepass: aegis.units.Bytes(usize) = .literal("1MiB"),
 /// A prefilter's table (Aho-Corasick over many literals), built at compile and kept in the
 /// `Regex`: a pattern whose table is larger has none.
 prefilter: aegis.units.Bytes(usize) = .literal("1MiB"),
+/// Lookaround's stored rows (oracle.zig) in each `Cache`, within `cache`: one bit per stored row
+/// per position of the haystack. A search whose rows would pass it is refused before it reads a
+/// byte (`error.HaystackTooLong`), and `Regex.longestHaystack` says the limit up front.
+oracle: aegis.units.Bytes(usize) = .literal("2MiB"),
 /// The largest dense DFA built ahead.
 dense_dfa: aegis.units.Bytes(usize) = .literal("2MiB"),

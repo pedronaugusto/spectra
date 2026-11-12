@@ -34,6 +34,7 @@ const literals_mod = @import("hir/literals.zig");
 const suffix_mod = @import("hir/suffix.zig");
 const inner_mod = @import("hir/inner.zig");
 const Automaton = @import("Automaton.zig");
+const oracle = @import("oracle.zig");
 
 pub const Span = pikevm.Span;
 pub const Input = pikevm.Input;
@@ -64,7 +65,38 @@ suffix: ?Suffix,
 inner: ?Inner,
 /// The forward lazy DFA of the all kind, for the stepping automaton: worked out at compile, its
 /// states in an `Automaton.Cache` of the walker's; null where `Limits.lazy_dfa` is too small.
-stepper: ?lazy.Dfa,
+stepper: ?lazy.Dfa = null,
+/// Lookaround's oracle (spectra.md §3.1), where the pattern holds a lookaround: null otherwise.
+look: ?Look = null,
+
+/// What a pattern with lookaround searches with. `find`, `captures` and `findAll` run the PikeVM
+/// over the main automaton's `check` states, answered by rows stored before it reads a byte
+/// (`search`: every lookaround the main expression queries stored). `isMatch` runs one scan of
+/// the strings-only main automaton (`match_nfa`) read the way that streams the lookarounds it
+/// queries directly (`match`), so it stores only the ones nested the other way. The lazy DFAs,
+/// the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet.
+const Look = struct {
+    search: oracle.Plan,
+    match: oracle.Plan,
+    match_nfa: Nfa,
+    match_scan: oracle.Scan,
+    /// `Limits.oracle`: each store's capacity, where its plan stores rows.
+    capacity: usize,
+
+    fn deinit(l: *Look, gpa: Allocator) void {
+        l.search.deinit(gpa);
+        l.match.deinit(gpa);
+        l.match_nfa.deinit(gpa);
+    }
+
+    fn searchCapacity(l: *const Look) usize {
+        return if (l.search.stored > 0) l.capacity else 0;
+    }
+
+    fn matchCapacity(l: *const Look) usize {
+        return if (l.match.stored > 0) l.capacity else 0;
+    }
+};
 
 const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
 
@@ -101,6 +133,7 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     ast.* = try parse_mod.parse(a, pattern, options.syntax, options.limits, options.diagnostic);
     const hir = try translate_mod.translate(a, ast, options.syntax, options.limits, options.diagnostic);
     const whole = ast.node(ast.root).span;
+    if (hir.lookarounds > 0) return compileLookaround(gpa, a, &hir, options, whole);
     const nfa = try compile_mod.compile(gpa, &hir, .{
         .limits = options.limits,
         .utf8 = options.syntax.utf8,
@@ -139,6 +172,70 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     }
     const stepper = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .all);
     return .{ .gpa = gpa, .nfa = nfa, .dfa = dfa, .reverse = reverse, .strategy = strategy, .backtracker = backtracker, .onepass = one, .prefilter = prefilter, .suffix = suffix, .inner = inner, .stepper = stepper };
+}
+
+/// A pattern with lookaround: the main automaton with `check` states, on the PikeVM alone, and
+/// the oracle's plans (`Look`). A group inside a positive lookaround is refused until its
+/// captures are rebuilt (a negative lookaround's groups never take part, as ECMA-262 says).
+fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options: Options, whole: Ast.Span) CompileError!Regex {
+    if (try groupInPositiveLookaround(arena, hir)) {
+        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .unsupported_lookaround };
+        return error.Unsupported;
+    }
+    const ecma = options.syntax.dialect == .ecmascript;
+    var nfa = try compile_mod.compile(gpa, hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole, .ecma = ecma, .lookaround = true }, options.diagnostic);
+    errdefer nfa.deinit(gpa);
+    const plan_options: oracle.PlanOptions = .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole };
+    var search = try oracle.plan(gpa, hir, plan_options, options.diagnostic);
+    errdefer search.deinit(gpa);
+    // `isMatch` reads the way most of the lookarounds the main expression queries read, so they
+    // stream: all lookaheads, as zod's patterns are, read backward and store nothing.
+    var ahead: usize = 0;
+    var behind: usize = 0;
+    for (search.rows) |r| if (r.parent == null) switch (r.scan) {
+        .backward => ahead += 1,
+        .forward => behind += 1,
+    };
+    const scan: oracle.Scan = if (ahead > behind) .backward else .forward;
+    var match_options = plan_options;
+    match_options.main = scan;
+    var match = try oracle.plan(gpa, hir, match_options, options.diagnostic);
+    errdefer match.deinit(gpa);
+    var match_nfa = try compile_mod.compile(gpa, hir, .{ .limits = options.limits, .utf8 = options.syntax.utf8, .span = whole, .strings = true, .lookaround = true, .reverse = scan == .backward, .reverse_unanchored = scan == .backward }, options.diagnostic);
+    errdefer match_nfa.deinit(gpa);
+    const look: Look = .{ .search = search, .match = match, .match_nfa = match_nfa, .match_scan = scan, .capacity = options.limits.oracle.raw() };
+    var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look };
+    if ((re.cacheBytesChecked() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+        if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
+        return error.TooLarge;
+    }
+    return re;
+}
+
+/// Whether a capture group lies inside a positive lookaround. Nodes come children first, so a
+/// pass from the last node down sees each parent before its children and carries whether a node
+/// lies inside one.
+fn groupInPositiveLookaround(arena: Allocator, hir: *const Hir) Allocator.Error!bool {
+    const inside = try arena.alloc(bool, hir.nodes.len);
+    @memset(inside, false);
+    var i = hir.nodes.len;
+    while (i > 0) {
+        i -= 1;
+        const here = inside[i];
+        switch (hir.nodes[i]) {
+            .capture => |cap| {
+                if (here) return true;
+                inside[@backingInt(cap.sub)] = here;
+            },
+            .lookaround => |la| inside[@backingInt(la.sub)] = here or !la.negated,
+            .repetition => |r| inside[@backingInt(r.sub)] = here,
+            .concat, .alternation => |slice| for (hir.childrenOf(slice)) |child| {
+                inside[@backingInt(child)] = here;
+            },
+            else => {},
+        }
+    }
+    return false;
 }
 
 /// The split of `hir`'s top concatenation P·X at the first child after the first whose
@@ -248,7 +345,24 @@ fn cacheBytesOf(nfa: *const Nfa, dfa: ?*const lazy.Dfa, reverse: ?*const lazy.Df
 
 /// The bytes a `Cache` of this pattern allocates, every engine's: what `Limits.cache` bounded.
 pub fn cacheBytes(re: *const Regex) usize {
-    return cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker, if (re.inner) |*i| &i.dfa else null).?;
+    return re.cacheBytesChecked().?;
+}
+
+fn cacheBytesChecked(re: *const Regex) ?usize {
+    const engines_bytes = cacheBytesOf(&re.nfa, if (re.dfa) |*d| d else null, if (re.reverse) |*r| &r.dfa else null, re.backtracker, if (re.inner) |*i| &i.dfa else null) orelse return null;
+    const l = if (re.look) |*l| l else return engines_bytes;
+    const stores = oracle.Cache.bytes(&l.search, null, l.searchCapacity()) + oracle.Cache.bytes(&l.match, &l.match_nfa, l.matchCapacity());
+    return std.math.add(usize, engines_bytes, stores) catch null;
+}
+
+/// The longest haystack `search` takes on this pattern, or null where it takes any: where the
+/// pattern holds a lookaround that search stores rows for, what `Limits.oracle` holds.
+pub fn longestHaystack(re: *const Regex, search: Search) ?usize {
+    const l = if (re.look) |*l| l else return null;
+    return switch (search) {
+        .is_match => oracle.longestFor(&l.match, l.capacity),
+        .find, .captures, .find_all => oracle.longestFor(&l.search, l.capacity),
+    };
 }
 
 /// The engines the compiled pattern has. The PikeVM always; the lazy DFA unless its store
@@ -283,6 +397,7 @@ pub fn deinit(re: *Regex) void {
     if (re.prefilter) |*p| p.deinit(re.gpa);
     if (re.suffix) |*s| s.prefilter.deinit(re.gpa);
     if (re.inner) |*i| i.deinit(re.gpa);
+    if (re.look) |*l| l.deinit(re.gpa);
     re.* = undefined;
 }
 
@@ -294,6 +409,9 @@ pub const Cache = struct {
     back: ?backtrack.Cache,
     /// P's reverse lazy DFA's store, for `Strategy.reverse_inner`.
     inner: ?lazy.Cache,
+    /// Lookaround's stores: the rows `find`, `captures` and `findAll` read, and `isMatch`'s.
+    look_search: ?oracle.Cache = null,
+    look_match: ?oracle.Cache = null,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
     last_start: Start = .pikevm,
@@ -322,6 +440,12 @@ pub const Cache = struct {
         reverse_inner,
         /// `Input.whole`: the PikeVM over the span, a match counted only at its end.
         whole,
+        /// A pattern with lookaround: the PikeVM over the main automaton, its `check` states
+        /// answered by the rows stored before it read a byte.
+        lookaround_pikevm,
+        /// A pattern with lookaround, `isMatch`: one scan of the main expression with the
+        /// lookarounds it queries streamed beside it.
+        lookaround_scan,
     };
 
     /// How the last `find` or `captures` found where its match starts.
@@ -353,6 +477,8 @@ pub const Cache = struct {
         if (c.reverse) |*r| r.deinit(gpa);
         if (c.back) |*b| b.deinit(gpa);
         if (c.inner) |*i| i.deinit(gpa);
+        if (c.look_search) |*l| l.deinit(gpa);
+        if (c.look_match) |*l| l.deinit(gpa);
     }
 };
 
@@ -365,7 +491,12 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
     errdefer if (reverse) |*r| r.deinit(gpa);
     var back: ?backtrack.Cache = if (re.backtracker) |b| try backtrack.Cache.init(gpa, b) else null;
     errdefer if (back) |*b| b.deinit(gpa);
-    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = if (re.inner) |*i| try lazy.Cache.init(gpa, &i.dfa) else null };
+    var inner: ?lazy.Cache = if (re.inner) |*i| try lazy.Cache.init(gpa, &i.dfa) else null;
+    errdefer if (inner) |*i| i.deinit(gpa);
+    var look_search: ?oracle.Cache = if (re.look) |*l| try .init(gpa, &l.search, null, l.searchCapacity()) else null;
+    errdefer if (look_search) |*l| l.deinit(gpa);
+    const look_match: ?oracle.Cache = if (re.look) |*l| try .init(gpa, &l.match, &l.match_nfa, l.matchCapacity()) else null;
+    return .{ .pike = pike, .lazy = forward, .reverse = reverse, .back = back, .inner = inner, .look_search = look_search, .look_match = look_match };
 }
 
 /// What the PikeVM searches: the input cut at the match's end where the lazy DFA found one, null
@@ -418,6 +549,10 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     if (c.reverse) |*r| r.visited = 0;
     if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
+    if (re.look != null) {
+        c.last = .lookaround_pikevm;
+        return .{ .search = input };
+    }
     if (input.whole) {
         c.last = .whole;
         return .{ .search = input };
@@ -518,26 +653,22 @@ fn reverseInner(re: *const Regex, c: *Cache, input: Input) lazy.LimitedError!?Sp
     }
 }
 
-/// Why a search is refused: `error.HaystackTooLong`, only where the compiled pattern stores
-/// lookaround rows for that kind of search and the haystack passes `Limits.oracle`
-/// (`longestHaystack` says the limit up front). No pattern stores rows yet: lookaround is
-/// refused at compile, so no search returns it today.
+/// Why a search is refused: `error.HaystackTooLong`, only where the compiled pattern holds a
+/// lookaround it stores rows for in that kind of search and the haystack passes `Limits.oracle`
+/// (`longestHaystack` says the limit up front), before a byte is read. Never otherwise.
 pub const SearchError = error{HaystackTooLong};
 
 /// The kinds of search, which may store different rows.
 pub const Search = enum { is_match, find, captures, find_all };
 
-/// The longest haystack `search` takes on this pattern, or null where it takes any: always
-/// null until lookaround stores rows.
-pub fn longestHaystack(re: *const Regex, search: Search) ?usize {
-    _ = re;
-    _ = search;
-    return null;
-}
 
 /// Whether some match is in `haystack`. `error.HaystackTooLong` only as `SearchError` says,
 /// never otherwise.
 pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!bool {
+    if (re.look) |*l| {
+        c.last = .lookaround_scan;
+        return oracle.isMatch(&l.match, &c.look_match.?, &l.match_nfa, l.match_scan, haystack, re.nfa.utf8 and re.nfa.empty_ok);
+    }
     var input: Input = .of(haystack);
     if (re.strategy == .reverse_anchored or re.strategy == .literal or re.strategy == .reverse_suffix or re.strategy == .reverse_inner) return re.findSpan(c, input) != null;
     input.earliest = true;
@@ -550,7 +681,16 @@ pub fn isMatch(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!bo
 /// The leftmost-first match. `error.HaystackTooLong` only as `SearchError` says, never
 /// otherwise.
 pub fn find(re: *const Regex, c: *Cache, input: Input) SearchError!?Span {
+    try re.rows(c, input.haystack);
     return re.findSpan(c, input);
+}
+
+/// Lookaround's stored rows over `haystack`, before a search of a pattern with lookaround reads
+/// a byte; nothing to do for any other.
+fn rows(re: *const Regex, c: *Cache, haystack: []const u8) SearchError!void {
+    const l = if (re.look) |*l| l else return;
+    try oracle.fill(&l.search, &c.look_search.?, haystack);
+    c.pike.rows = .{ .plan = &l.search, .cache = &c.look_search.? };
 }
 
 fn findSpan(re: *const Regex, c: *Cache, input: Input) ?Span {
@@ -585,6 +725,7 @@ fn slotted(re: *const Regex, c: *Cache, input: Input, slots: []?usize) ?usize {
 /// preferred match from there ends where they said, so its captures are the leftmost-first
 /// match's. `error.HaystackTooLong` only as `SearchError` says, never otherwise.
 pub fn captures(re: *const Regex, c: *Cache, input: Input, out: []?Span) SearchError!bool {
+    try re.rows(c, input.haystack);
     return re.capturesOf(c, input, out);
 }
 
@@ -640,9 +781,18 @@ pub const Matches = struct {
     cache: *Cache,
     input: Input,
     last_end: ?usize = null,
+    /// Lookaround's rows are built once for the haystack, before the first match.
+    rows: bool = false,
+
+    fn prepare(m: *Matches) SearchError!void {
+        if (m.rows) return;
+        try m.re.rows(m.cache, m.input.haystack);
+        m.rows = true;
+    }
 
     /// The next match. `error.HaystackTooLong` only as `SearchError` says, never otherwise.
     pub fn next(m: *Matches) SearchError!?Span {
+        try m.prepare();
         if (m.input.span.start > m.input.span.end) return null;
         var found = m.re.findSpan(m.cache, m.input) orelse return null;
         if (found.start == found.end and m.last_end == found.end) {
@@ -658,6 +808,7 @@ pub const Matches = struct {
     /// The next match as `next` finds it, with each group's span in `out`.
     /// `error.HaystackTooLong` only as `SearchError` says, never otherwise.
     pub fn nextCaptures(m: *Matches, out: []?Span) SearchError!bool {
+        try m.prepare();
         if (m.input.span.start > m.input.span.end) return false;
         if (!m.re.capturesOf(m.cache, m.input, out)) return false;
         if (out[0].?.start == out[0].?.end and m.last_end == out[0].?.end) {

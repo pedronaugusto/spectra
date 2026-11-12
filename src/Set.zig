@@ -87,6 +87,11 @@ pub fn compile(gpa: Allocator, sources: []const aegis.input.Untrusted([]const u8
         const ast = try a.create(Ast);
         ast.* = try parse_mod.parse(a, source, options.syntax, options.limits, options.diagnostic);
         hir.* = try translate_mod.translate(a, ast, options.syntax, options.limits, options.diagnostic);
+        // A set searches without lookaround's rows: refused by name in the first cut.
+        if (hir.lookarounds > 0) {
+            if (options.diagnostic) |d| d.* = .{ .span = ast.node(ast.root).span, .reason = .unsupported_lookaround_in_set };
+            return error.Unsupported;
+        }
     }
     var nfa = try compile_mod.compileSet(gpa, hirs, .{
         .limits = options.limits,
