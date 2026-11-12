@@ -12,7 +12,8 @@ follow [Semantic Versioning](https://semver.org/).
   Barrière and Pit-Claudel's oracle method. Each lookaround's row (its truth at every position) is built by a scan
   that writes every match, innermost first, or streamed beside the scan that queries it where that scan reads its
   way. `find`, `captures` and `findAll` run the PikeVM over rows stored before a byte is read; `isMatch` scans the
-  main expression with its lookarounds streamed. `Limits.oracle` bounds the stored rows; a haystack past it is
+  main expression with its lookarounds streamed; `find` and `captures` stream the main expression's lookbehinds
+  beside the PikeVM. `Limits.oracle` bounds the stored rows; a haystack past it is
   refused with `error.HaystackTooLong`, and `Regex.longestHaystack` says the limit. Groups inside a positive
   lookaround are its first success's, rebuilt after the match by one anchored run of its body read its way (a new
   `backward` compile mode and a backward PikeVM for lookbehind). A lookaround in a `Set` is refused

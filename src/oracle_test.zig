@@ -74,7 +74,7 @@ test "a lookaround read the way of the scan that queries it is streamed; the oth
     for (p.rows, want) |r, stored| try testing.expectEqual(stored, r.slot != null);
     try testing.expectEqual(4, p.stored);
     // With a forward main scan, the top lookbehind streams there too.
-    var forward = try oracle.plan(gpa, &hir, .{ .main = .forward }, null);
+    var forward = try oracle.plan(gpa, &hir, .{ .layout = .{ .main = .forward } }, null);
     defer forward.deinit(gpa);
     try testing.expectEqual(null, forward.rows[3].slot);
     try testing.expectEqual(3, forward.stored);

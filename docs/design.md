@@ -155,10 +155,12 @@ state that reads it keeps the uniform futures every linear engine relies on. Eac
 its truth at every position, is built by a scan that writes every accept and never stops: forward over
 `.*?body` for a lookbehind, backward over `.*?rev(body)` for a lookahead, on strings-only automata.
 A lookaround read the same way as the scan that queries it is **streamed**, its automaton a lane in
-lockstep with that scan; one read the other way is **stored**, built first, innermost first. `find`,
-`captures` and `findAll` store every row the main expression queries and run the PikeVM over the main
-automaton; `isMatch` scans the strings-only main expression the way that streams most of its
-lookarounds (all of zod's patterns read backward and store nothing). Stored rows take a bit per
+lockstep with that scan; one read the other way is **stored**, built first, innermost first. `find`
+and `captures` run the PikeVM over the main automaton with the main expression's lookbehinds streamed
+beside it, their bits one position ahead of its step, and its lookaheads stored; `findAll` stores them
+all, since its searches restart along the haystack; `isMatch` scans the strings-only main expression
+the way that streams most of its lookarounds (all of zod's patterns read backward and store nothing).
+A lookaround inside another is stored wherever the groups of the outer one are rebuilt. Stored rows take a bit per
 position each, within `Limits.oracle`; a haystack past it is refused before a byte is read
 (`error.HaystackTooLong`, `Regex.longestHaystack`). A positive lookaround's groups are rebuilt after
 the match: the main automaton writes the last position the path took each one at into its first

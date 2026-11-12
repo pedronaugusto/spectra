@@ -158,11 +158,12 @@ pub const Cache = struct {
     visited: usize = 0,
     /// The pattern whose match the last search found: 0 but in a set.
     pattern: u32 = 0,
-    /// Lookaround's stored rows over the haystack being searched, for an automaton with `check`
-    /// states: set by the caller once they are built, read by every `check`.
+    /// Lookaround's rows over the haystack being searched, for an automaton with `check` states:
+    /// set by the caller once the stored ones are built, read by every `check`. With `streams`,
+    /// the plan's streamed lookarounds run beside the search, one position ahead of its step.
     rows: ?Rows = null,
 
-    pub const Rows = struct { plan: *const oracle.Plan, cache: *const oracle.Cache };
+    pub const Rows = struct { plan: *const oracle.Plan, cache: *oracle.Cache, streams: bool };
 
     /// Allocates what `sizes(nfa)` counts, which `Limits.cache` has bounded at compile.
     pub fn init(gpa: Allocator, nfa: *const Nfa) Allocator.Error!Cache {
@@ -224,11 +225,14 @@ fn searchOnce(nfa: *const Nfa, cache: *Cache, input: Input, slots: []?usize) ?us
     var found: ?usize = null;
     var at = input.span.start;
     const visited_before = cache.visited;
+    if (cache.rows) |r| if (r.streams) r.cache.begin(r.plan, at);
     while (at <= input.span.end) : (at += 1) {
         if (curr.set.len == 0) {
             if (found != null) break;
             if (anchored and at > input.span.start) break;
         }
+        // The streams closed here and at the next position, which the step's closure reads.
+        if (cache.rows) |r| if (r.streams) r.cache.advance(r.plan, input.haystack, @min(at + 1, input.haystack.len));
         // A thread started here comes after every thread started before: leftmost first.
         if (found == null and (!anchored or at == input.span.start)) {
             closure(nfa, cache, curr, next.absent(stride), input.haystack, at, start, true);
@@ -463,7 +467,7 @@ fn closure(nfa: *const Nfa, cache: *Cache, into: *Active, slots: []?usize, hayst
                         // the futures merged at a state are still one.
                         .check => |k| {
                             const rows = cache.rows orelse aegis.assert.never("a search of an automaton with lookaround is given its rows");
-                            if (rows.cache.stored(rows.plan, k.row, at) == k.negated) break;
+                            if (rows.cache.truthAt(rows.plan, k.row, at) == k.negated) break;
                             // The last place the path took it, for its groups to be rebuilt.
                             if (k.slot < stride) {
                                 push(cache, &depth, .{ .restore = .{ .slot = k.slot, .value = slots[k.slot] } });

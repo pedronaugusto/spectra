@@ -76,23 +76,40 @@ test "zod's email pattern: every lookahead streams, so is-match stores nothing" 
 }
 
 test "a haystack whose rows pass Limits.oracle is refused by name, before a byte is read" {
-    var re = try Regex.compile(gpa, .init("(?<=a)b"), .{ .syntax = ecma, .limits = .{ .oracle = .fromRaw(@sizeOf(usize)) } });
-    defer re.deinit();
-    var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    const tiny: @import("Limits.zig") = .{ .oracle = .fromRaw(@sizeOf(usize)) };
     // One stored row of one word: 64 positions, 63 bytes.
-    try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), re.longestHaystack(.find));
     const fits: [@bitSizeOf(usize) - 1]u8 = @splat('a');
-    try testing.expectEqual(null, try re.find(&c, .of(&fits)));
     const long: [@bitSizeOf(usize)]u8 = @splat('a');
-    try testing.expectError(error.HaystackTooLong, re.find(&c, .of(&long)));
     var groups: [1]?Regex.Span = undefined;
-    try testing.expectError(error.HaystackTooLong, re.captures(&c, .of(&long), &groups));
-    var it = re.findAll(&c, &long);
+
+    // A lookahead is read the other way from find's scan: stored, and refused past the limit.
+    var ahead = try Regex.compile(gpa, .init("a(?=b)"), .{ .syntax = ecma, .limits = tiny });
+    defer ahead.deinit();
+    var ac = try ahead.cache(gpa);
+    defer ac.deinit(gpa);
+    try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), ahead.longestHaystack(.find));
+    try testing.expectEqual(null, try ahead.find(&ac, .of(&fits)));
+    try testing.expectError(error.HaystackTooLong, ahead.find(&ac, .of(&long)));
+    try testing.expectError(error.HaystackTooLong, ahead.captures(&ac, .of(&long), &groups));
+    // Is-match reads backward and streams it: no limit.
+    try testing.expectEqual(null, ahead.longestHaystack(.is_match));
+    try testing.expect(!try ahead.isMatch(&ac, &long));
+
+    // A lookbehind streams beside find's PikeVM: no limit there; every match in turn stores it.
+    var behind = try Regex.compile(gpa, .init("(?<=a)b"), .{ .syntax = ecma, .limits = tiny });
+    defer behind.deinit();
+    var bc = try behind.cache(gpa);
+    defer bc.deinit(gpa);
+    try testing.expectEqual(null, behind.longestHaystack(.find));
+    try testing.expectEqual(null, behind.longestHaystack(.is_match));
+    try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), behind.longestHaystack(.find_all));
+    var longer: [@bitSizeOf(usize) + 1]u8 = @splat('a');
+    longer[longer.len - 1] = 'b';
+    try testing.expectEqual(span(longer.len - 1, longer.len), try behind.find(&bc, .of(&longer)));
+    try testing.expect(try behind.captures(&bc, .of(&longer), &groups));
+    try testing.expect(try behind.isMatch(&bc, &longer));
+    var it = behind.findAll(&bc, &longer);
     try testing.expectError(error.HaystackTooLong, it.next());
-    // Is-match streams the lookbehind forward: no limit.
-    try testing.expectEqual(null, re.longestHaystack(.is_match));
-    try testing.expect(!try re.isMatch(&c, &long));
 }
 
 fn expectGroups(pattern: []const u8, haystack: []const u8, want: []const ?Regex.Span) !void {
@@ -137,7 +154,7 @@ test "a positive lookaround's groups are its first success's, read its way; a ne
 
 // Every search against ECMA-262's matcher.
 
-var reached: struct { patterns: usize = 0, matched: usize = 0, groups: usize = 0, inside: usize = 0, scans_storing: usize = 0, budget: usize = 0 } = .{};
+var reached: struct { patterns: usize = 0, matched: usize = 0, groups: usize = 0, inside: usize = 0, scans_storing: usize = 0, find_streaming: usize = 0, budget: usize = 0 } = .{};
 
 fn anySearch(_: void, case: *shakedown.Case) !void {
     const s = case.source;
@@ -173,6 +190,8 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     };
     reached.patterns += 1;
     if (re.longestHaystack(.is_match) != null) reached.scans_storing += 1;
+    // Find streams the main expression's lookbehinds beside the PikeVM.
+    if (re.look.?.stream.stored < re.look.?.search.stored) reached.find_streaming += 1;
     errdefer std.debug.print("/{s}/ on {any}: ECMA-262 {any}\n", .{ text.items, hay.items, want });
     try testing.expectEqual(want != null, try re.isMatch(&c, hay.items));
     const groups = try a.alloc(?Regex.Span, re.captureCount());
@@ -196,5 +215,5 @@ test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matche
     try shakedown.check(gpa, {}, anySearch, .{ .cases = 4000, .seed = 0x10a4 });
     if (fuzzing) return;
     errdefer std.debug.print("{any}\n", .{reached});
-    try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.inside > 200 and reached.scans_storing > 100);
+    try testing.expect(reached.patterns > 1000 and reached.matched > 500 and reached.groups > 100 and reached.inside > 200 and reached.scans_storing > 100 and reached.find_streaming > 300);
 }
