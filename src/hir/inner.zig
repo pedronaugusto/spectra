@@ -45,7 +45,7 @@
 //! stopped ends the attempt); either way the core strategy answers, so the work stays linear.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Hir = @import("Hir.zig");
+const Hir = @import("../Hir.zig");
 const suffix = @import("suffix.zig");
 const literals = @import("literals.zig");
 

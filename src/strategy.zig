@@ -1,7 +1,7 @@
 //! How a compiled pattern is searched, chosen once at compile from what its automata say:
 //! regex-automata's meta strategies, those that need no prefilter (the literal ones, reverse
 //! suffix and reverse inner, come with the prefilters).
-const Nfa = @import("nfa/Nfa.zig");
+const Nfa = @import("Nfa.zig");
 const pikevm = @import("pikevm.zig");
 const lazy = @import("lazy.zig");
 

@@ -29,7 +29,7 @@ const Automaton = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const Nfa = @import("nfa/Nfa.zig");
+const Nfa = @import("Nfa.zig");
 const lazy = @import("lazy.zig");
 
 nfa: *const Nfa,

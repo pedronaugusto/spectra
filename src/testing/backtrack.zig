@@ -6,7 +6,7 @@
 //! With ECMAScript's empty checks (`Nfa.loop_checks`) a path also carries whether it read a byte
 //! since its innermost `loop_begin`, and a (state, bit, position) is what is explored once.
 const std = @import("std");
-const Nfa = @import("../nfa/Nfa.zig");
+const Nfa = @import("../Nfa.zig");
 const look = @import("../nfa/look.zig");
 
 pub const Span = struct { start: usize, end: usize };

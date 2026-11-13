@@ -13,7 +13,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const Nfa = @import("nfa/Nfa.zig");
+const Nfa = @import("Nfa.zig");
 const look = @import("nfa/look.zig");
 const oracle = @import("oracle.zig");
 

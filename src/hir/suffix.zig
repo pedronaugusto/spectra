@@ -48,7 +48,7 @@
 //! rests on a byte a part might read after all.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Hir = @import("Hir.zig");
+const Hir = @import("../Hir.zig");
 
 /// A part of Q, the pattern with its literal suffix taken off: a node of the pattern, the bytes
 /// left of a literal, or a repetition left with fewer times.

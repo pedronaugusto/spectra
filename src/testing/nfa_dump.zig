@@ -1,7 +1,7 @@
 //! An automaton written out state by state, as the compiler's tests pin shapes: each state's
 //! number, `>` for the anchored start and `^` for the unanchored one, and where it goes.
 const std = @import("std");
-const Nfa = @import("../nfa/Nfa.zig");
+const Nfa = @import("../Nfa.zig");
 
 pub fn dump(a: std.mem.Allocator, nfa: *const Nfa) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(a);

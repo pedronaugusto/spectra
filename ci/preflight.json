@@ -22,6 +22,13 @@
         "src/kernels/arm_neon.zig"
       ],
       "reason": "Each file is the root of a module of its own, the kernels built with the CPU features their instructions need (Zig sets features per module) and the scan they share; they share no namespace and are imported by module name, so an entry file would publish nothing."
+    },
+    "src/kernels/x86": {
+      "files": [
+        "src/kernels/x86_ssse3.zig",
+        "src/kernels/x86_avx2.zig"
+      ],
+      "reason": "The two x86 kernels share the architecture in their names, not a namespace: each is the root of its own module, built with its own CPU features and imported by module name, so an x86 entry file would publish nothing."
     }
   },
   "glint_paths": [

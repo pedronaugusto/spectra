@@ -14,7 +14,7 @@
 //! memory, exponential in the worst case, so it counts its steps and gives up at a budget.
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Hir = @import("../hir/Hir.zig");
+const Hir = @import("../Hir.zig");
 
 pub const Span = struct { start: usize, end: usize };
 

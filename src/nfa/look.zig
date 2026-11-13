@@ -9,7 +9,7 @@
 //! on one side, which is a whole one.
 const std = @import("std");
 const xenoglyph = @import("xenoglyph");
-const Look = @import("../hir/Hir.zig").Look;
+const Look = @import("../Hir.zig").Look;
 
 pub fn holds(look: Look, haystack: []const u8, at: usize) bool {
     return switch (look) {

@@ -21,7 +21,7 @@
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const Hir = @import("Hir.zig");
+const Hir = @import("../Hir.zig");
 
 pub const Literal = struct {
     bytes: []const u8,

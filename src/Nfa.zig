@@ -9,7 +9,7 @@ const Nfa = @This();
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
-const Hir = @import("../hir/Hir.zig");
+const Hir = @import("Hir.zig");
 
 pub const StateId = aegis.handle.Index(Nfa, u32);
 
