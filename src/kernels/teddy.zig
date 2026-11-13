@@ -8,6 +8,7 @@
 //! in each kernel module that instantiates it, with that module's instructions: one file per
 //! instruction set holds the shuffle, the only instruction it needs that the baseline may lack.
 const std = @import("std");
+const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 
 pub const max_literals = 64;
@@ -36,11 +37,11 @@ pub const Teddy = struct {
 
     /// The tables of `lits`: at most `max_literals`, each nonempty.
     pub fn build(gpa: Allocator, lits: []const []const u8) Allocator.Error!Teddy {
-        std.debug.assert(lits.len > 0 and lits.len <= max_literals);
+        aegis.assert.invariant(lits.len > 0 and lits.len <= max_literals, "lits.len > 0 and lits.len <= max_literals");
         var t: Teddy = .{ .n = 3, .lo = @splat(@splat(0)), .hi = @splat(@splat(0)), .bytes = &.{}, .literals = &.{}, .first = undefined };
         var total: usize = 0;
         for (lits) |lit| {
-            std.debug.assert(lit.len > 0);
+            aegis.assert.invariant(lit.len > 0, "lit.len > 0");
             t.n = @intCast(@min(t.n, lit.len));
             total += lit.len;
         }

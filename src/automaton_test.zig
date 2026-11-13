@@ -226,7 +226,7 @@ fn walkWords(a: std.mem.Allocator, re: *const Regex, store: usize, words: []cons
     try w.begin(a);
     var prev: []const u8 = "";
     for (words, out) |word, *answer| {
-        const common = std.mem.indexOfDiff(u8, prev, word) orelse @min(prev.len, word.len);
+        const common = std.mem.findDiff(u8, prev, word) orelse @min(prev.len, word.len);
         while (w.path.items.len > common) w.pop();
         for (word[common..]) |b| try w.push(a, b);
         answer.* = try w.matches();

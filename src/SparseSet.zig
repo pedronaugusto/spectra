@@ -8,7 +8,7 @@ const Allocator = std.mem.Allocator;
 pub const Key = u32;
 
 /// The bytes one entry of capacity costs.
-pub const bytesPer = @sizeOf(Key) + @sizeOf(u32);
+pub const bytes_per = @sizeOf(Key) + @sizeOf(u32);
 
 dense: []Key,
 sparse: []u32,

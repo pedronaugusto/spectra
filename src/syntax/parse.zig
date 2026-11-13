@@ -3,6 +3,7 @@
 //! parsed with an explicit stack, bounded by `Limits.nesting`, and so are classes inside
 //! classes; nothing recurses on the pattern's shape.
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
@@ -29,7 +30,7 @@ const Context = struct {
 };
 
 fn parseTrusted(c: Context, pattern: []const u8) Error!Ast {
-    if (pattern.len > c.limits.pattern.raw()) {
+    if (aegis.units.Bytes(usize).fromRaw(pattern.len).compare(c.limits.pattern.convert(usize)) == .gt) {
         if (c.diagnostic) |d| d.* = .{ .span = .{ .start = 0, .end = 0 }, .reason = .pattern_too_long };
         return error.TooLarge;
     }
@@ -112,7 +113,7 @@ const Parser = struct {
         const start = p.at;
         const n = std.unicode.utf8ByteSequenceLength(p.pattern[p.at]) catch return p.fail(start, start + 1, .invalid_utf8);
         if (@as(usize, p.at) + n > p.pattern.len) return p.fail(start, @intCast(p.pattern.len), .invalid_utf8);
-        const cp = std.unicode.utf8Decode(p.pattern[p.at..][0..n]) catch return p.fail(start, start + n, .invalid_utf8);
+        const cp = utf8.decode(p.pattern[p.at..][0..n]) catch return p.fail(start, start + n, .invalid_utf8);
         p.at += n;
         return cp;
     }
@@ -164,7 +165,8 @@ const Parser = struct {
             const b = p.peek() orelse break;
             switch (b) {
                 '(' => {
-                    if (stack.items.len > p.limits.nesting.raw()) return p.tooLarge(start, .nesting_too_deep);
+                    const most_nesting = p.limits.nesting.raw();
+                    if (stack.items.len > most_nesting) return p.tooLarge(start, .nesting_too_deep);
                     p.at += 1;
                     if (try p.groupOpening(start, frame)) |opened| {
                         try stack.append(p.arena, opened);
@@ -359,7 +361,8 @@ const Parser = struct {
         while (p.peek()) |c| {
             if (!std.ascii.isDigit(c)) break;
             value = value * 10 + (c - '0');
-            if (value > p.limits.repetition.raw()) return p.tooLarge(start, .repetition_count_too_large);
+            const most_repeats = p.limits.repetition.raw();
+            if (value > most_repeats) return p.tooLarge(start, .repetition_count_too_large);
             p.at += 1;
         }
         if (p.at == digits) return p.fail(start, p.at, .repetition_count_invalid);
@@ -471,11 +474,11 @@ const Parser = struct {
             negated = !negated;
             body = body[1..];
         }
-        if (std.mem.indexOf(u8, body, "!=")) |i| {
+        if (std.mem.find(u8, body, "!=")) |i| {
             if (i == 0 or i + 2 == body.len) return p.fail(start, p.at, .unicode_class_invalid);
             return .{ .name = body[0..i], .value = body[i + 2 ..], .negated = !negated };
         }
-        if (std.mem.indexOfAny(u8, body, "=:")) |i| {
+        if (std.mem.findAny(u8, body, "=:")) |i| {
             if (i == 0 or i + 1 == body.len) return p.fail(start, p.at, .unicode_class_invalid);
             return .{ .name = body[0..i], .value = body[i + 1 ..], .negated = negated };
         }
@@ -532,7 +535,8 @@ const Parser = struct {
                     try level.items.append(p.arena, .{ .ascii = ascii });
                     continue;
                 }
-                if (levels.items.len >= p.limits.nesting.raw()) return p.tooLarge(at, .nesting_too_deep);
+                const most_nesting = p.limits.nesting.raw();
+                if (levels.items.len >= most_nesting) return p.tooLarge(at, .nesting_too_deep);
                 try p.openLevel(&levels);
                 continue;
             }
@@ -600,7 +604,7 @@ const Parser = struct {
     fn asciiClass(p: *Parser) Error!?Ast.Ascii {
         if (!p.startsWith("[:")) return null;
         const rest = p.pattern[p.at + 2 ..];
-        const close = std.mem.indexOf(u8, rest, ":]") orelse return null;
+        const close = std.mem.find(u8, rest, ":]") orelse return null;
         var name = rest[0..close];
         var negated = false;
         if (name.len != 0 and name[0] == '^') {

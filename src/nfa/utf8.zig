@@ -24,7 +24,7 @@ pub const Sequence = struct {
     }
 };
 
-const Scalars = struct { lo: u32, hi: u32 };
+pub const Scalars = struct { lo: u32, hi: u32 };
 
 /// The sequences of one range of code points, in byte order.
 pub const Sequences = struct {

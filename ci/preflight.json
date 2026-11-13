@@ -12,6 +12,9 @@
   "test_dependencies": [
     "shakedown"
   ],
+  "shipped": {
+    "LICENSES": "the MIT and BSD licences of the Rust regex code src/hir translates and of the RE2 and test262 material the tests carry: those licences ask that they travel with copies of the code"
+  },
   "function_exceptions": {},
   "layout_exceptions": {
     "src/kernels": {

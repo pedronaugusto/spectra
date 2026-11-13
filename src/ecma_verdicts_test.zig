@@ -90,7 +90,7 @@ const Tally = struct {
 };
 
 fn codeUnits(case: Case) bool {
-    if (std.mem.indexOfAny(u8, case.flags, "uv") != null) return false;
+    if (std.mem.findAny(u8, case.flags, "uv") != null) return false;
     for (case.haystack) |b| if (b >= 0xf0) return true;
     return false;
 }

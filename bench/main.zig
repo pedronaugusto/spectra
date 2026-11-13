@@ -148,7 +148,7 @@ fn compile(r: Report, gpa: Allocator, rounds: usize) !void {
 
 fn sets(r: Report, gpa: Allocator, a: Allocator, text: []const u8, n: usize) !void {
     const sources = try a.alloc(@import("aegis").input.Untrusted([]const u8), n);
-    for (sources, 0..) |*s, i| s.* = .init(try std.fmt.allocPrint(a, "word{d}|Holmes{d}", .{ i, i }));
+    for (sources, 0..) |*s, i| s.* = .init(try a.print("word{d}|Holmes{d}", .{ i, i }));
     var set = try Set.compile(gpa, sources, .{});
     defer set.deinit();
     var c = try set.cache(gpa);
@@ -157,7 +157,7 @@ fn sets(r: Report, gpa: Allocator, a: Allocator, text: []const u8, n: usize) !vo
     defer out.deinit(gpa);
     const t0 = r.now();
     _ = try set.matches(&c, .of(text), &out);
-    const name = try std.fmt.allocPrint(a, "{d}-patterns", .{n});
+    const name = try a.print("{d}-patterns", .{n});
     try r.line("set", name, "matches", nsBetween(t0, r.now()) / 1e6, "ms");
 }
 

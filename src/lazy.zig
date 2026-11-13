@@ -177,7 +177,7 @@ pub const Dfa = struct {
         const store = @as(usize, d.states) * d.stride * @sizeOf(u32) + @as(usize, d.states) * @sizeOf(Rec) +
             @as(usize, d.keys) * @sizeOf(Key) + @as(usize, d.slots) * @sizeOf(u32);
         // The two closure sets, the stack, and `source` and `joined`: seeds and patterns each.
-        const scratch = 2 * @as(usize, d.threads) * SparseSet.bytesPer + @as(usize, d.stack) * @sizeOf(Explore) +
+        const scratch = 2 * @as(usize, d.threads) * SparseSet.bytes_per + @as(usize, d.stack) * @sizeOf(Explore) +
             2 * (@as(usize, d.threads) + d.patterns) * @sizeOf(Key);
         return store + scratch;
     }
@@ -206,7 +206,7 @@ pub fn buildLook(nfa: *const Nfa, capacity: usize, direction: Direction, kind: K
     const word = nfa.looks.intersectWith(words).count() > 0;
     const lf = nfa.looks.intersectWith(lines).count() > 0;
     const cr = nfa.looks.intersectWith(returns).count() > 0;
-    var bounds: std.StaticBitSet(257) = .empty;
+    var bounds: std.bit_set.Static(257) = .empty;
     for (nfa.states) |s| switch (s) {
         .byte_range => |t| mark(&bounds, t.lo, t.hi, quit),
         .sparse => |slice| for (nfa.transitionsOf(slice)) |t| mark(&bounds, t.lo, t.hi, quit),
@@ -248,7 +248,7 @@ pub fn buildLook(nfa: *const Nfa, capacity: usize, direction: Direction, kind: K
 
 /// Bytes `lo` to `hi` apart from their neighbours; past 0x7f nothing is told apart when those
 /// bytes quit.
-fn mark(bounds: *std.StaticBitSet(257), lo: u8, hi: u8, quit: bool) void {
+fn mark(bounds: *std.bit_set.Static(257), lo: u8, hi: u8, quit: bool) void {
     if (!quit or lo < 0x80) bounds.set(lo);
     if (!quit or hi < 0x80) bounds.set(@as(usize, hi) + 1);
 }
@@ -292,7 +292,7 @@ fn aheadOf(kind: Context) Ahead {
 /// A state as the cache keeps it: its seeds (`keys[start..][0..len]`, state ids), the byte before
 /// it, and whether a match ended at the position before the byte that led to it; in the all
 /// kind, which patterns' matches (`keys[start + len ..][0..matched]`, ascending).
-const Rec = struct {
+pub const Rec = struct {
     start: u32,
     len: u32,
     /// Some seed is the main expression's: with lookaround's lanes, a state of lanes alone
@@ -306,7 +306,7 @@ const Rec = struct {
     restart: bool,
 };
 
-const Explore = struct { id: Nfa.StateId, read: bool };
+pub const Explore = struct { id: Nfa.StateId, read: bool };
 
 /// Where every state of one automaton's lazy DFA lives, owned by the caller: a fixed store,
 /// allocated once and cleared when full, and the scratch states are built in.
@@ -778,7 +778,7 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8, col:
     };
     c.a.len = 0;
     // A seed has just read a byte, or is the start: its bit is set.
-    for (c.keys[rec.start..][0..rec.len]) |seed| closure(nfa, c, @fromBackingInt(seed), decide);
+    for (c.keys[rec.start..][0..rec.len]) |seed| closure(nfa, c, nfa.stateAt(seed), decide);
     c.b.len = 0;
     var match = false;
     var matched: usize = 0;
@@ -792,7 +792,7 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8, col:
                 if (d.kind == .all) {
                     // Kept apart from the seeds at the end of `joined`, then put after them.
                     const pats = c.joined[c.joined.len - d.patterns ..];
-                    if (std.mem.indexOfScalar(Key, pats[0..matched], pattern) == null) {
+                    if (std.mem.findScalar(Key, pats[0..matched], pattern) == null) {
                         pats[matched] = pattern;
                         matched += 1;
                     }
@@ -812,7 +812,7 @@ fn next(nfa: *const Nfa, d: *const Dfa, c: *Cache, from_id: u32, unit: ?u8, col:
     if (matched > 0) {
         const pats = c.joined[c.joined.len - d.patterns ..][0..matched];
         std.mem.sort(Key, pats, {}, std.sort.asc(Key));
-        std.mem.copyForwards(Key, c.joined[seeds.len..][0..matched], pats);
+        @memmove(c.joined[seeds.len..][0..matched], pats);
         @memcpy(c.joined[0..seeds.len], seeds);
         keys = c.joined[0 .. seeds.len + matched];
     }
@@ -949,9 +949,10 @@ pub fn combine(gpa: Allocator, main: *const Nfa, p: *const oracle.Plan, of: ?u32
         const lane = &p.rows[row].nfa;
         const shift: u32 = @intCast(states.items.len);
         try append(gpa, &states, &transitions, &alternatives, lane, @intCast(row));
-        try starts.append(gpa, @fromBackingInt(lane.start_unanchored.raw() + shift));
+        const moved: Shift = .{ .by = shift, .len = states.items.len };
+        try starts.append(gpa, moved.id(lane.start_unanchored));
         for (lane.states, 0..) |st, i| if (st == .match) {
-            lane_match[row] = @fromBackingInt(@as(u32, @intCast(i)) + shift);
+            lane_match[row] = moved.id(lane.stateAt(@intCast(i)));
         };
         looks = looks.unionWith(lane.looks);
     }
@@ -1061,30 +1062,36 @@ pub fn scanAll(nfa: *const Nfa, d: *const Dfa, c: *Cache, haystack: []const u8, 
     return c.recs[s].match and sink.accept(last);
 }
 
+/// An automaton's state ids moved past the `by` states already there, into `len` states in all.
+const Shift = struct {
+    by: u32,
+    len: usize,
+
+    fn id(s: Shift, x: Nfa.StateId) Nfa.StateId {
+        return Nfa.StateId.from(x.raw() + s.by, s.len) catch aegis.assert.never("a moved state stays among the states appended");
+    }
+};
+
 /// Appends `nfa`'s states, each id moved past those already there; with `lane`, its match
 /// becomes that lookaround's accept (`1 + lane`).
 fn append(gpa: Allocator, states: *std.ArrayList(Nfa.State), transitions: *std.ArrayList(Nfa.Transition), alternatives: *std.ArrayList(Nfa.StateId), nfa: *const Nfa, lane: ?u32) Allocator.Error!void {
     const shift: u32 = @intCast(states.items.len);
     const t_shift: u32 = @intCast(transitions.items.len);
     const a_shift: u32 = @intCast(alternatives.items.len);
-    const m = struct {
-        fn id(x: Nfa.StateId, by: u32) Nfa.StateId {
-            return @fromBackingInt(x.raw() + by);
-        }
-    };
-    for (nfa.transitions) |t| try transitions.append(gpa, .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next, shift) });
-    for (nfa.alternatives) |x| try alternatives.append(gpa, m.id(x, shift));
+    const m: Shift = .{ .by = shift, .len = shift + nfa.states.len };
+    for (nfa.transitions) |t| try transitions.append(gpa, .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next) });
+    for (nfa.alternatives) |x| try alternatives.append(gpa, m.id(x));
     for (nfa.states) |st| try states.append(gpa, switch (st) {
-        .byte_range => |t| .{ .byte_range = .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next, shift) } },
+        .byte_range => |t| .{ .byte_range = .{ .lo = t.lo, .hi = t.hi, .next = m.id(t.next) } },
         .sparse => |slice| .{ .sparse = .{ .start = slice.start + t_shift, .len = slice.len } },
-        .look => |l| .{ .look = .{ .look = l.look, .next = m.id(l.next, shift) } },
-        .binary => |b| .{ .binary = .{ .first = m.id(b.first, shift), .second = m.id(b.second, shift) } },
+        .look => |l| .{ .look = .{ .look = l.look, .next = m.id(l.next) } },
+        .binary => |b| .{ .binary = .{ .first = m.id(b.first), .second = m.id(b.second) } },
         .alternation => |slice| .{ .alternation = .{ .start = slice.start + a_shift, .len = slice.len } },
-        .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = m.id(cap.next, shift) } },
-        .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = m.id(cl.next, shift) } },
-        .loop_begin => |n| .{ .loop_begin = m.id(n, shift) },
-        .loop_end => |n| .{ .loop_end = m.id(n, shift) },
-        .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .slot = k.slot, .next = m.id(k.next, shift) } },
+        .capture => |cap| .{ .capture = .{ .group = cap.group, .slot = cap.slot, .next = m.id(cap.next) } },
+        .clear => |cl| .{ .clear = .{ .first = cl.first, .end = cl.end, .next = m.id(cl.next) } },
+        .loop_begin => |n| .{ .loop_begin = m.id(n) },
+        .loop_end => |n| .{ .loop_end = m.id(n) },
+        .check => |k| .{ .check = .{ .row = k.row, .negated = k.negated, .slot = k.slot, .next = m.id(k.next) } },
         .fail => .fail,
         .match => |pattern| .{ .match = if (lane) |l| 1 + l else pattern },
     });

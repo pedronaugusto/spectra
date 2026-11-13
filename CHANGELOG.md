@@ -11,9 +11,16 @@ follow [Semantic Versioning](https://semver.org/).
 - In the ECMAScript dialect, `findAll` (and so `replace`) iterates as a global `exec` does: an empty match right after
   a match is reported, so a caller may see one more empty match than before; after an empty match the search moves on
   one character. The Rust dialect keeps regex's rule.
+- `Set.Patterns.Iterator` holds the set's pattern count, `len`, beside the bit iterator, and makes each pattern
+  through `Pattern.from`; a bit past the count stops the program in every build.
+- The package no longer ships docs/design.md; it stays in the repository.
 
 ### Added
 
+- `Regex.Cache.strategy_fell_back`: whether the last search's strategy (reverse suffix, reverse inner or reverse
+  anchored) quit or gave up and the search went on as the core engines did.
+- `Regex.Suffix`, `Regex.Inner`, `Regex.Reverse`, `Regex.Look` (with `Look.Body` and `Look.Scanner`) are public, as
+  the types of `Regex`'s public fields.
 - Benchmark rows (`bench/main.zig`, `zig build bench`): rebar's shapes over a synthetic text, compile time by pattern
   class, sets of 10 to 1000 patterns, zod's lookaround patterns, replace and split. CI compiles them.
 - RE2's search tests (the pattern and text table of re2/testing/search_test.cc) run against the test backtracker,

@@ -194,7 +194,7 @@ pub fn plan(gpa: Allocator, hir: *const Hir, options: PlanOptions, diagnostic: ?
 
 /// One lane of a scan: a lookaround's automaton, the states the last byte led to (its seeds),
 /// and the states closed from them at the position being read.
-const Lane = struct {
+pub const Lane = struct {
     seeds: SparseSet,
     closed: SparseSet,
 };
@@ -260,11 +260,11 @@ pub const Cache = struct {
         var total = capacity / @sizeOf(usize) * @sizeOf(usize);
         var stack_len: usize = 1;
         for (p.rows) |r| {
-            total += 2 * r.nfa.states.len * SparseSet.bytesPer;
+            total += 2 * r.nfa.states.len * SparseSet.bytes_per;
             stack_len = @max(stack_len, r.nfa.states.len + r.nfa.alternatives.len + 1);
         }
         if (main) |m| {
-            total += 2 * m.states.len * SparseSet.bytesPer;
+            total += 2 * m.states.len * SparseSet.bytes_per;
             stack_len = @max(stack_len, m.states.len + m.alternatives.len + 1);
         }
         total += (p.rows.len + 1) * @sizeOf(Lane) + 2 * ((p.rows.len + 63) / 64 * 8) + (p.rows.len + 1) * @sizeOf(u32);
@@ -290,7 +290,7 @@ pub const Cache = struct {
     pub fn holds(c: *const Cache, slot: u32, at: usize) bool {
         aegis.assert.invariant(at < c.positions, "a row is read at a position of its haystack");
         const word = c.bits[slot * c.stride + at / @bitSizeOf(usize)];
-        return word >> @intCast(at % @bitSizeOf(usize)) & 1 != 0;
+        return (word >> @intCast(at % @bitSizeOf(usize))) & 1 != 0;
     }
 
     /// Writes stored row `slot` as holding at `at`: a row's scan, NFA or lazy DFA.
@@ -363,10 +363,10 @@ fn closeLane(p: *const Plan, c: *Cache, nfa: *const Nfa, lane: *Lane, haystack: 
     lane.closed.len = 0;
     // The lazy `.*?` before the body starts a match at every position.
     closure(p, c, nfa, &lane.closed, nfa.start_unanchored, haystack, at);
-    for (lane.seeds.items()) |seed| closure(p, c, nfa, &lane.closed, @fromBackingInt(seed), haystack, at);
+    for (lane.seeds.items()) |seed| closure(p, c, nfa, &lane.closed, nfa.stateAt(seed), haystack, at);
     var accepted = false;
     for (lane.closed.items()) |key| {
-        if (nfa.state(@fromBackingInt(key)) == .match) accepted = true;
+        if (nfa.state(nfa.stateAt(key)) == .match) accepted = true;
     }
     return accepted;
 }
@@ -376,7 +376,7 @@ fn stepLane(c: *Cache, nfa: *const Nfa, lane: *Lane, byte: u8) void {
     lane.seeds.len = 0;
     for (lane.closed.items()) |key| {
         c.visited += 1;
-        const to: ?Nfa.StateId = switch (nfa.state(@fromBackingInt(key))) {
+        const to: ?Nfa.StateId = switch (nfa.state(nfa.stateAt(key))) {
             .byte_range => |t| if (t.contains(byte)) t.next else null,
             .sparse => |slice| stepSparse(nfa, slice, byte),
             else => null,
@@ -434,7 +434,7 @@ pub fn fill(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
 /// they would pass it.
 pub fn prepare(p: *const Plan, c: *Cache, haystack: []const u8) Error!void {
     const positions = haystack.len + 1;
-    const stride = std.math.divCeil(usize, positions, @bitSizeOf(usize)) catch unreachable;
+    const stride = positions / @bitSizeOf(usize) + @intFromBool(positions % @bitSizeOf(usize) != 0);
     if (p.stored > 0 and (std.math.mul(usize, stride, p.stored) catch return error.HaystackTooLong) > c.bits.len) return error.HaystackTooLong;
     c.stride = stride;
     c.positions = positions;

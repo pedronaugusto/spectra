@@ -78,7 +78,7 @@ dialect: Syntax.Dialect = .rust,
 /// the strings-only main automaton (`match_nfa`) read the way that streams the lookarounds it
 /// queries directly (`match`), so it stores only the ones nested the other way. The lazy DFAs,
 /// the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet.
-const Look = struct {
+pub const Look = struct {
     /// Every row stored: `findAll`'s, whose searches restart along the haystack, and the rebuild
     /// runs'. It owns the row automata; the plans below are views of it.
     search: oracle.Plan,
@@ -108,9 +108,9 @@ const Look = struct {
     /// `isMatch`'s scan of the main expression as a lazy DFA, its streamed lanes folded in.
     match_dfa: ?Scanner,
 
-    const Scanner = struct { combined: lazy.Combined, dfa: ?lazy.Dfa };
+    pub const Scanner = struct { combined: lazy.Combined, dfa: ?lazy.Dfa };
 
-    const Body = struct { nfa: Nfa, scan: oracle.Scan, slot: u32, groups: [2]u32 };
+    pub const Body = struct { nfa: Nfa, scan: oracle.Scan, slot: u32, groups: [2]u32 };
 
     fn deinit(l: *Look, gpa: Allocator) void {
         l.stream_combined.deinit(gpa);
@@ -139,9 +139,9 @@ const Look = struct {
     }
 };
 
-const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
+pub const Suffix = struct { prefilter: prefilter_mod.Prefilter, len: usize };
 
-const Inner = struct {
+pub const Inner = struct {
     prefilter: prefilter_mod.Prefilter,
     nfa: Nfa,
     dfa: lazy.Dfa,
@@ -152,7 +152,7 @@ const Inner = struct {
     }
 };
 
-const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
+pub const Reverse = struct { nfa: Nfa, dfa: lazy.Dfa };
 
 pub const Options = struct {
     syntax: Syntax = .{},
@@ -207,7 +207,7 @@ pub fn compile(gpa: Allocator, pattern: aegis.input.Untrusted([]const u8), optio
     errdefer if (inner) |*i| i.deinit(gpa);
     if (inner != null) strategy = .reverse_inner;
     // What each search's cache would hold, refused before any is made.
-    if ((cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null, backtracker, if (inner) |*i| &i.dfa else null) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+    if (aegis.units.Bytes(usize).fromRaw(cacheBytesOf(&nfa, if (dfa) |*d| d else null, if (reverse) |*r| &r.dfa else null, backtracker, if (inner) |*i| &i.dfa else null) orelse std.math.maxInt(usize)).compare(options.limits.cache) == .gt) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
@@ -285,7 +285,7 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
         .match_dfa = match_dfa,
     };
     var re: Regex = .{ .gpa = gpa, .nfa = nfa, .dfa = null, .reverse = null, .strategy = .pikevm, .backtracker = null, .onepass = null, .prefilter = null, .suffix = null, .inner = null, .look = look, .dialect = options.syntax.dialect };
-    if ((re.cacheBytesChecked() orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+    if (aegis.units.Bytes(usize).fromRaw(re.cacheBytesChecked() orelse std.math.maxInt(usize)).compare(options.limits.cache) == .gt) {
         if (options.diagnostic) |d| d.* = .{ .span = whole, .reason = .cache_too_large };
         return error.TooLarge;
     }
@@ -563,6 +563,9 @@ pub const Cache = struct {
     rows_nfa: usize = 0,
     /// How the last search was answered, for the tests that count each engine's work.
     last: Path = .pikevm,
+    /// Whether the last search's strategy (a reverse suffix, a reverse inner or a reverse
+    /// anchored search) quit or gave up, and the search went on as `core`.
+    strategy_fell_back: bool = false,
     last_start: Start = .pikevm,
     /// Which engine wrote the last `find`'s or `captures`' slots, where one was asked.
     last_slots: Slots = .pikevm,
@@ -771,6 +774,7 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
     if (c.reverse) |*r| r.visited = 0;
     if (c.back) |*b| b.explored = 0;
     c.last_start = .pikevm;
+    c.strategy_fell_back = false;
     if (re.look) |*l| return re.locateLook(l, c, input);
     if (input.whole) {
         c.last = .whole;
@@ -789,14 +793,18 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
             c.last = .reverse_suffix;
             c.last_start = .reverse_dfa;
             return if (found) |span| .{ .span = span } else .none;
-        } else |_| {}
+        } else |_| {
+            c.strategy_fell_back = true;
+        }
     }
     if (re.strategy == .reverse_inner and !input.anchored) {
         if (re.reverseInner(c, input)) |found| {
             c.last = .reverse_inner;
             c.last_start = .reverse_dfa;
             return if (found) |span| .{ .span = span } else .none;
-        } else |_| {}
+        } else |_| {
+            c.strategy_fell_back = true;
+        }
     }
     if (re.strategy == .reverse_anchored) {
         const r = &re.reverse.?;
@@ -804,7 +812,9 @@ fn locate(re: *const Regex, c: *Cache, input: Input) Located {
             c.last = .reverse_anchored;
             c.last_start = .reverse_dfa;
             return if (found) |span| .{ .span = span } else .none;
-        } else |_| {}
+        } else |_| {
+            c.strategy_fell_back = true;
+        }
     }
     const cut = re.narrowed(c, input) orelse return .none;
     if (c.last == .lazy_dfa) if (re.reverse) |*r| {
@@ -1246,7 +1256,7 @@ pub fn replace(re: *const Regex, c: *Cache, writer: *std.Io.Writer, haystack: []
 pub fn expand(re: *const Regex, writer: *std.Io.Writer, template: []const u8, haystack: []const u8, groups: []const ?Span) std.Io.Writer.Error!void {
     var i: usize = 0;
     while (i < template.len) {
-        const dollar = std.mem.indexOfScalarPos(u8, template, i, '$') orelse {
+        const dollar = std.mem.findScalarPos(u8, template, i, '$') orelse {
             try writer.writeAll(template[i..]);
             return;
         };
@@ -1278,7 +1288,7 @@ fn expandRust(re: *const Regex, writer: *std.Io.Writer, template: []const u8, at
     var name: []const u8 = "";
     var after: usize = at + 1;
     if (rest.len > 0 and rest[0] == '{') {
-        if (std.mem.indexOfScalar(u8, rest, '}')) |close| {
+        if (std.mem.findScalar(u8, rest, '}')) |close| {
             name = rest[1..close];
             after = at + 1 + close + 1;
         }
@@ -1329,7 +1339,8 @@ fn expandEcma(re: *const Regex, writer: *std.Io.Writer, template: []const u8, at
             // are literal.
             const count = groups.len - 1;
             var digits: usize = if (rest.len >= 2 and std.ascii.isDigit(rest[1])) 2 else 1;
-            var index = std.fmt.parseInt(usize, rest[0..digits], 10) catch unreachable;
+            var index: usize = rest[0] - '0';
+            if (digits == 2) index = index * 10 + (rest[1] - '0');
             if (index > count and digits == 2) {
                 digits = 1;
                 index = rest[0] - '0';
@@ -1343,7 +1354,7 @@ fn expandEcma(re: *const Regex, writer: *std.Io.Writer, template: []const u8, at
             const named = for (re.nfa.names) |n| {
                 if (n != null) break true;
             } else false;
-            const close = std.mem.indexOfScalar(u8, rest, '>');
+            const close = std.mem.findScalar(u8, rest, '>');
             if (!named or close == null) {
                 try writer.writeAll("$<");
                 return at + 2;

@@ -31,7 +31,7 @@ pub const Error = error{
     Deep,
 };
 
-const Job = union(enum) {
+pub const Job = union(enum) {
     explore: struct { id: Nfa.StateId, read: bool, at: usize },
     restore: struct { slot: u32, value: ?usize },
 };
@@ -113,7 +113,8 @@ pub fn search(nfa: *const Nfa, c: *Cache, input: Input, slots: []?usize) Error!?
 fn searchOnce(nfa: *const Nfa, c: *Cache, input: Input, slots: []?usize) Error!?usize {
     if (input.span.start > input.span.end) return null;
     const width = input.span.len() + 1;
-    @memset(c.visited[0 .. std.math.divCeil(usize, c.threads * width, @bitSizeOf(usize)) catch unreachable], 0);
+    const bits = c.threads * width;
+    @memset(c.visited[0 .. bits / @bitSizeOf(usize) + @intFromBool(bits % @bitSizeOf(usize) != 0)], 0);
     // A failed start puts back every slot it wrote: they stay empty between starts.
     @memset(slots, null);
     const anchored = input.anchored or nfa.start_anchored == nfa.start_unanchored;

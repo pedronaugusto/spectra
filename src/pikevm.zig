@@ -54,7 +54,7 @@ const Key = SparseSet.Key;
 const SparseSet = @import("SparseSet.zig");
 
 /// The threads at one position: which, and each one's slots.
-const Active = struct {
+pub const Active = struct {
     set: SparseSet,
     /// `stride` slots per thread, and one row more of absent slots for a thread just started.
     table: []?usize,
@@ -82,7 +82,7 @@ const Active = struct {
     }
 };
 
-const Follow = union(enum) {
+pub const Follow = union(enum) {
     explore: struct { id: Nfa.StateId, read: bool },
     restore: struct { slot: u32, value: ?usize },
 };
@@ -100,7 +100,7 @@ pub const Sizes = struct {
 
     /// The bytes they come to, or null past `usize`.
     pub fn bytes(s: Sizes) ?usize {
-        const set = mul(s.threads, SparseSet.bytesPer) orelse return null;
+        const set = mul(s.threads, SparseSet.bytes_per) orelse return null;
         const table = mul(mul(add(s.threads, 1) orelse return null, s.slots) orelse return null, @sizeOf(?usize)) orelse return null;
         const active = add(set, table) orelse return null;
         const both = mul(active, 2) orelse return null;
@@ -142,7 +142,7 @@ pub fn keyOf(nfa: *const Nfa, id: Nfa.StateId, read: bool) Key {
 }
 
 pub fn stateOf(nfa: *const Nfa, key: Key) Nfa.StateId {
-    return @fromBackingInt(if (nfa.loop_checks) key / 2 else key);
+    return nfa.stateAt(if (nfa.loop_checks) key / 2 else key);
 }
 
 /// What one automaton's searches need, made once: no search allocates.

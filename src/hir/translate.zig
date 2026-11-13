@@ -64,7 +64,7 @@ pub fn translate(arena: Allocator, ast: *const Ast, syntax: Syntax, limits: Limi
 /// `translate`, and in `spent` the bytes it was charged for, refused or not.
 pub fn translateCounted(arena: Allocator, ast: *const Ast, syntax: Syntax, limits: Limits, diagnostic: ?*Diagnostic, spent: *usize) Error!Hir {
     var charged: Charged = .{ .child = arena, .left = limits.nfa.raw() };
-    defer spent.* = limits.nfa.raw() - charged.left;
+    defer spent.* = (limits.nfa.sub(.fromRaw(charged.left)) catch aegis.assert.never("the allocator charges no more than it was given")).raw();
     var t: Translator = .{
         .arena = arena,
         .sets = charged.allocator(),

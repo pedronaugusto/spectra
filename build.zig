@@ -19,10 +19,16 @@ fn spectraModule(b: *std.Build, p: *std.Build, target: std.Build.ResolvedTarget,
 /// CPU features per module), entered only where ladar says the CPU has them. `kernels_teddy` is
 /// the scan they share, generic and inline, so each compiles it with its own instructions.
 fn addSourceImports(b: *std.Build, p: *std.Build, module: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) void {
-    module.addImport("aegis", p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis"));
+    const aegis = p.dependency("aegis", .{ .target = target, .optimize = optimize }).module("aegis");
+    module.addImport("aegis", aegis);
     module.addImport("xenoglyph", p.dependency("xenoglyph", .{ .target = target, .optimize = optimize }).module("xenoglyph"));
     module.addImport("ladar", p.dependency("ladar", .{ .target = target, .optimize = optimize }).module("ladar"));
-    const teddy = b.createModule(.{ .root_source_file = p.path("src/kernels/teddy.zig"), .target = target, .optimize = optimize });
+    const teddy = b.createModule(.{
+        .root_source_file = p.path("src/kernels/teddy.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "aegis", .module = aegis }},
+    });
     module.addImport("kernels_teddy", teddy);
     const Kernel = struct { name: []const u8, source: []const u8, features: std.Target.Cpu.Feature.Set };
     const kernels: []const Kernel = switch (target.result.cpu.arch) {

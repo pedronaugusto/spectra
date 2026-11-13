@@ -206,7 +206,7 @@ pub fn containsAll(hir: *const Hir, q: []const Part, lit: []const u8) bool {
 fn partReads(hir: *const Hir, part: Part, b: u8) bool {
     return switch (part) {
         .node => |n| nodeReads(hir, n, b),
-        .bytes => |bytes| std.mem.indexOfScalar(u8, bytes, b) != null,
+        .bytes => |bytes| std.mem.findScalar(u8, bytes, b) != null,
         .repeat => |r| nodeReads(hir, r.sub, b),
     };
 }
@@ -217,7 +217,7 @@ fn nodeReads(hir: *const Hir, index: Hir.Index, b: u8) bool {
     return switch (hir.node(index)) {
         .empty, .look => false,
         .lookaround => true,
-        .literal => |bytes| std.mem.indexOfScalar(u8, bytes, b) != null,
+        .literal => |bytes| std.mem.findScalar(u8, bytes, b) != null,
         .byte_class => |ranges| inRanges(u8, ranges, b),
         .unicode_class => |ranges| b >= 0x80 or inRanges(u21, ranges, b),
         .capture => |c| nodeReads(hir, c.sub, b),

@@ -13,6 +13,7 @@
 //! in its sets, `s` in its dot, `m` in its line assertions. Tests only: it backtracks without
 //! memory, exponential in the worst case, so it counts its steps and gives up at a budget.
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 const Allocator = std.mem.Allocator;
 const Hir = @import("../Hir.zig");
 
@@ -37,7 +38,7 @@ pub fn exec(arena: Allocator, hir: *const Hir, haystack: []const u8, budget: usi
     while (i < haystack.len) {
         const n = std.unicode.utf8ByteSequenceLength(haystack[i]) catch return error.InvalidUtf8;
         if (i + n > haystack.len) return error.InvalidUtf8;
-        const cp = std.unicode.utf8Decode(haystack[i..][0..n]) catch return error.InvalidUtf8;
+        const cp = utf8.decode(haystack[i..][0..n]) catch return error.InvalidUtf8;
         try points.append(arena, cp);
         try offsets.append(arena, i);
         i += n;
@@ -71,7 +72,7 @@ pub fn lookaroundHolds(arena: Allocator, hir: *const Hir, node: Hir.Index, hayst
         if (i == haystack.len) break;
         const n = std.unicode.utf8ByteSequenceLength(haystack[i]) catch return error.InvalidUtf8;
         if (i + n > haystack.len) return error.InvalidUtf8;
-        try points.append(arena, std.unicode.utf8Decode(haystack[i..][0..n]) catch return error.InvalidUtf8);
+        try points.append(arena, utf8.decode(haystack[i..][0..n]) catch return error.InvalidUtf8);
         i += n;
     }
     var m: Matcher = .{ .arena = arena, .hir = hir, .input = points.items, .left = budget };

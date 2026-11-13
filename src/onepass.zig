@@ -26,7 +26,7 @@ const pikevm = @import("pikevm.zig");
 pub const Input = pikevm.Input;
 
 /// What a path crossed without reading: the slots it wrote and the assertions it passed.
-const Epsilons = struct {
+pub const Epsilons = struct {
     slots: u32 = 0,
     looks: Nfa.LookSet = .empty,
 
@@ -37,7 +37,7 @@ const Epsilons = struct {
 
 const none: u32 = std.math.maxInt(u32);
 
-const Transition = struct {
+pub const Transition = struct {
     next: u32 = none,
     /// Found after the match in preference order: where the match holds, it wins.
     match_wins: bool = false,
@@ -109,7 +109,7 @@ const Builder = struct {
 
     /// Byte classes: bytes no transition tells apart.
     fn classify(b: *Builder) void {
-        var bounds: std.StaticBitSet(257) = .empty;
+        var bounds: std.bit_set.Static(257) = .empty;
         for (b.nfa.states) |s| switch (s) {
             .byte_range => |t| {
                 bounds.set(t.lo);

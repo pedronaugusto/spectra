@@ -8,6 +8,7 @@
 //! not decode, so an empty match there never splits a code point; `\b` needs a word character
 //! on one side, which is a whole one.
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 const xenoglyph = @import("xenoglyph");
 const Look = @import("../Hir.zig").Look;
 
@@ -72,7 +73,7 @@ pub fn decodeBefore(haystack: []const u8, at: usize) ?u21 {
     while (start > floor and haystack[start] & 0xc0 == 0x80) start -= 1;
     const n = std.unicode.utf8ByteSequenceLength(haystack[start]) catch return null;
     if (start + n != at) return null;
-    return std.unicode.utf8Decode(haystack[start..at]) catch null;
+    return utf8.decode(haystack[start..at]) catch null;
 }
 
 /// The code point that starts at `at`, if the bytes there decode as one.
@@ -80,7 +81,7 @@ pub fn decodeAfter(haystack: []const u8, at: usize) ?u21 {
     if (at >= haystack.len) return null;
     const n = std.unicode.utf8ByteSequenceLength(haystack[at]) catch return null;
     if (at + n > haystack.len) return null;
-    return std.unicode.utf8Decode(haystack[at..][0..n]) catch null;
+    return utf8.decode(haystack[at..][0..n]) catch null;
 }
 
 fn decodesBefore(haystack: []const u8, at: usize) bool {

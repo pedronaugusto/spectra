@@ -4,7 +4,7 @@ const gantry = @import("gantry");
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "teddy", .patterns = &.{"src/kernels/teddy.zig"} },
     .{ .name = "kernels", .patterns = &.{ "src/kernels/x86_ssse3.zig", "src/kernels/x86_avx2.zig", "src/kernels/arm_neon.zig" } },
-    .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig", "src/Charged.zig", "src/SparseSet.zig" } },
+    .{ .name = "vocabulary", .patterns = &.{ "src/Syntax.zig", "src/Limits.zig", "src/Charged.zig", "src/SparseSet.zig", "src/utf8.zig" } },
     .{ .name = "syntax", .patterns = &.{ "src/syntax/Ast.zig", "src/syntax/diagnostic.zig", "src/syntax/parse.zig", "src/syntax/ecma.zig" } },
     .{ .name = "hir", .patterns = &.{ "src/hir/ranges.zig", "src/Hir.zig", "src/hir/translate.zig", "src/hir/literals.zig", "src/hir/suffix.zig", "src/hir/inner.zig" } },
     .{ .name = "nfa", .patterns = &.{ "src/nfa/utf8.zig", "src/Nfa.zig", "src/nfa/look.zig", "src/nfa/compile.zig" } },
@@ -45,6 +45,7 @@ pub const required = [_][]const u8{
     "src/Limits.zig",
     "src/Charged.zig",
     "src/SparseSet.zig",
+    "src/utf8.zig",
     "src/syntax/Ast.zig",
     "src/syntax/diagnostic.zig",
     "src/syntax/parse.zig",

@@ -146,7 +146,7 @@ pub const Aho = struct {
     /// The automaton of `lits`, or null where its table passes `limit` bytes.
     fn build(gpa: Allocator, lits: []const literals.Literal, limit: usize) Allocator.Error!?Aho {
         var a: Aho = .{ .classes = undefined, .stride = 0, .next = &.{}, .longest = &.{}, .max_len = 0 };
-        var bounds: std.StaticBitSet(257) = .empty;
+        var bounds: std.bit_set.Static(257) = .empty;
         for (lits) |lit| for (lit.bytes) |b| {
             bounds.set(b);
             bounds.set(@as(usize, b) + 1);
@@ -268,7 +268,7 @@ fn findBytes(haystack: []const u8, start: usize, set: []const u8) ?usize {
         if (mask != 0) return at + @ctz(mask);
     }
     while (at < haystack.len) : (at += 1) {
-        if (std.mem.indexOfScalar(u8, set, haystack[at]) != null) return at;
+        if (std.mem.findScalar(u8, set, haystack[at]) != null) return at;
     }
     return null;
 }
@@ -289,7 +289,7 @@ pub fn chooseWith(gpa: Allocator, prefixes: *const literals.Seq, limit: usize, k
     var len: u8 = 0;
     for (lits) |lit| {
         const b = lit.bytes[0];
-        if (std.mem.indexOfScalar(u8, set[0..len], b) != null) continue;
+        if (std.mem.findScalar(u8, set[0..len], b) != null) continue;
         if (len == 3) {
             if (kernel) |k| if (lits.len <= teddy.max_literals) {
                 var bytes: [teddy.max_literals][]const u8 = undefined;

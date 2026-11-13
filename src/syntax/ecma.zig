@@ -11,6 +11,7 @@
 //! written but as an escape. Without `u` or `v`, ECMA-262 reads a code point past U+FFFF as its
 //! two UTF-16 code units; so does this, as two literals.
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 const aegis = @import("aegis");
 const xenoglyph = @import("xenoglyph");
 const Allocator = std.mem.Allocator;
@@ -60,7 +61,7 @@ const Validation = struct {
 const Valid = struct { ast: Ast };
 
 fn validateTrusted(c: Validation, pattern: []const u8) Error!Valid {
-    if (pattern.len > c.limits.pattern.raw()) {
+    if (aegis.units.Bytes(usize).fromRaw(pattern.len).compare(c.limits.pattern.convert(usize)) == .gt) {
         if (c.diagnostic) |d| d.* = .{ .span = .{ .start = 0, .end = 0 }, .reason = .pattern_too_long };
         return error.TooLarge;
     }
@@ -74,13 +75,13 @@ fn readFlags(flags: []const u8, diagnostic: ?*Diagnostic) ?Mode {
     var seen: [known.len]bool = @splat(false);
     for (flags, 0..) |c, i| {
         const at: u32 = @intCast(@min(i, std.math.maxInt(u32) - 1));
-        const index = std.mem.indexOfScalar(u8, known, c) orelse return flagFailure(diagnostic, at);
+        const index = std.mem.findScalar(u8, known, c) orelse return flagFailure(diagnostic, at);
         if (seen[index]) return flagFailure(diagnostic, at);
         seen[index] = true;
     }
-    const u = seen[std.mem.indexOfScalar(u8, known, 'u').?];
-    const v = seen[std.mem.indexOfScalar(u8, known, 'v').?];
-    if (u and v) return flagFailure(diagnostic, @intCast(@min(std.mem.lastIndexOfAny(u8, flags, "uv").?, std.math.maxInt(u32) - 1)));
+    const u = seen[std.mem.findScalar(u8, known, 'u').?];
+    const v = seen[std.mem.findScalar(u8, known, 'v').?];
+    if (u and v) return flagFailure(diagnostic, @intCast(@min(std.mem.findLastAny(u8, flags, "uv").?, std.math.maxInt(u32) - 1)));
     return if (v) .unicode_sets else if (u) .unicode else .annex_b;
 }
 
@@ -196,7 +197,7 @@ const Parser = struct {
         const start = p.at;
         const n = std.unicode.utf8ByteSequenceLength(p.pattern[p.at]) catch return p.fail(start, start + 1, .invalid_utf8);
         if (@as(usize, p.at) + n > p.pattern.len) return p.fail(start, @intCast(p.pattern.len), .invalid_utf8);
-        const cp = std.unicode.utf8Decode(p.pattern[p.at..][0..n]) catch return p.fail(start, start + n, .invalid_utf8);
+        const cp = utf8.decode(p.pattern[p.at..][0..n]) catch return p.fail(start, start + n, .invalid_utf8);
         p.at += n;
         return cp;
     }
@@ -250,7 +251,8 @@ const Parser = struct {
             const b = p.peek() orelse break;
             switch (b) {
                 '(' => {
-                    if (stack.items.len > p.limits.nesting.raw()) return p.tooLarge(start, .nesting_too_deep);
+                    const most_nesting = p.limits.nesting.raw();
+                    if (stack.items.len > most_nesting) return p.tooLarge(start, .nesting_too_deep);
                     p.at += 1;
                     const opened = try p.groupOpening(start, stack.items);
                     try stack.append(p.arena, opened);
@@ -483,7 +485,8 @@ const Parser = struct {
         var value: u64 = 0;
         for (digits) |d| {
             value = @min(value * 10 + (d - '0'), std.math.maxInt(u32));
-            if (!p.validating and value > p.limits.repetition.raw()) return p.tooLarge(start, .repetition_count_too_large);
+            const most_repeats = p.limits.repetition.raw();
+            if (!p.validating and value > most_repeats) return p.tooLarge(start, .repetition_count_too_large);
         }
         return @intCast(value);
     }
@@ -496,7 +499,7 @@ const Parser = struct {
             p.at += 1;
             greedy = false;
         }
-        const target = frame.items.getLastOrNull() orelse return p.fail(start, p.at, .repetition_missing);
+        const target = frame.items.last() orelse return p.fail(start, p.at, .repetition_missing);
         const node = p.nodes.items[@backingInt(target)];
         const quantifiable = switch (node.kind) {
             .assertion, .repetition => false,
@@ -622,7 +625,7 @@ const Parser = struct {
             },
             else => {
                 if (p.unicode()) {
-                    if (std.mem.indexOfScalar(u8, "^$\\.*+?()[]{}|/", c) == null) return p.fail(start, p.at + 1, .escape_unrecognized);
+                    if (std.mem.findScalar(u8, "^$\\.*+?()[]{}|/", c) == null) return p.fail(start, p.at + 1, .escape_unrecognized);
                     p.at += 1;
                     return c;
                 }
@@ -852,7 +855,8 @@ const Parser = struct {
                 continue;
             }
             if (b == '[') {
-                if (levels.items.len >= p.limits.nesting.raw()) return p.tooLarge(at, .nesting_too_deep);
+                const most_nesting = p.limits.nesting.raw();
+                if (levels.items.len >= most_nesting) return p.tooLarge(at, .nesting_too_deep);
                 try p.openSetLevel(&levels);
                 continue;
             }
@@ -952,14 +956,14 @@ const Parser = struct {
                 p.at += 1;
                 return 0x08;
             }
-            if (std.mem.indexOfScalar(u8, "&-!#%,:;<=>@`~", c) != null) {
+            if (std.mem.findScalar(u8, "&-!#%,:;<=>@`~", c) != null) {
                 p.at += 1;
                 return c;
             }
             return p.characterEscape(at, true);
         }
-        if (std.mem.indexOfScalar(u8, "&!#$%*+,.:;<=>?@^`~", b) != null and p.peekAt(1) == b) return p.fail(at, at + 2, .class_set_character_reserved);
-        if (std.mem.indexOfScalar(u8, "()[]{}/-\\|", b) != null) return p.fail(at, at + 1, .class_set_character_reserved);
+        if (std.mem.findScalar(u8, "&!#$%*+,.:;<=>?@^`~", b) != null and p.peekAt(1) == b) return p.fail(at, at + 2, .class_set_character_reserved);
+        if (std.mem.findScalar(u8, "()[]{}/-\\|", b) != null) return p.fail(at, at + 1, .class_set_character_reserved);
         return p.take();
     }
 

@@ -103,6 +103,12 @@ pub fn state(nfa: *const Nfa, id: StateId) State {
     return nfa.states[id.raw()];
 }
 
+/// The state numbered `raw`, a number the automaton's own searches wrote: one past its states
+/// stops the program in every build.
+pub fn stateAt(nfa: *const Nfa, raw: u32) StateId {
+    return StateId.from(raw, nfa.states.len) catch aegis.assert.never("a state's number names a state of the automaton");
+}
+
 /// A `sparse` state's transitions.
 pub fn transitionsOf(nfa: *const Nfa, slice: Slice) []const Transition {
     return nfa.transitions[slice.start..][0..slice.len];

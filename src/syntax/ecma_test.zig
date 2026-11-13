@@ -358,8 +358,8 @@ test "every case is valid or not as ECMA-262 has it" {
 fn syntaxOf(flags: []const u8) Syntax {
     return .{
         .dialect = .ecmascript,
-        .unicode = std.mem.indexOfScalar(u8, flags, 'u') != null,
-        .unicode_sets = std.mem.indexOfScalar(u8, flags, 'v') != null,
+        .unicode = std.mem.findScalar(u8, flags, 'u') != null,
+        .unicode_sets = std.mem.findScalar(u8, flags, 'v') != null,
     };
 }
 

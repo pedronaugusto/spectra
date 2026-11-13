@@ -930,24 +930,7 @@ const Builder = struct {
             r.* = count;
             count += 1;
         }
-        // A chain of empty states leads to one that is not: the compiler never closes a loop
-        // of them, since every loop it makes passes an alternation.
-        for (states, 0..) |s, i| {
-            if (s != .empty or remap[i] != unset) continue;
-            var target = i;
-            var steps: usize = 0;
-            while (states[target] == .empty and remap[target] == unset) : (steps += 1) {
-                aegis.assert.invariant(steps < states.len, "no loop of empty states");
-                target = states[target].empty;
-                aegis.assert.invariant(target != unset, "every empty state is joined to what follows");
-            }
-            const final = remap[target];
-            var k = i;
-            while (states[k] == .empty and remap[k] == unset) {
-                remap[k] = final;
-                k = states[k].empty;
-            }
-        }
+        skipEmpty(states, remap);
 
         const out_states = try gpa.alloc(Nfa.State, count);
         errdefer gpa.free(out_states);
@@ -955,7 +938,7 @@ const Builder = struct {
         errdefer gpa.free(out_trans);
         const out_alts = try gpa.alloc(Nfa.StateId, alternatives);
         errdefer gpa.free(out_alts);
-        const map: Remap = .{ .remap = remap };
+        const map: Remap = .{ .remap = remap, .len = count };
         var t_at: u32 = 0;
         var a_at: u32 = 0;
         for (states, remap) |s, r| {
@@ -998,31 +981,7 @@ const Builder = struct {
             out_states[r] = out;
         }
 
-        const no_nodes: []const Hir.Node = &.{};
-        const nodes = if (named) |h| h.nodes else no_nodes;
-        const groups = if (named) |h| h.captures + 1 else 1;
-        const names = try gpa.alloc(?[]const u8, groups);
-        errdefer gpa.free(names);
-        @memset(names, null);
-        var name_len: usize = 0;
-        for (nodes) |node| switch (node) {
-            .capture => |cap| if (cap.name) |name| {
-                name_len += name.len;
-            },
-            else => {},
-        };
-        const name_bytes = try gpa.alloc(u8, name_len);
-        errdefer gpa.free(name_bytes);
-        var n_at: usize = 0;
-        for (nodes) |node| switch (node) {
-            .capture => |cap| if (cap.name) |name| {
-                aegis.assert.invariant(cap.index < groups, "a group's number is one the pattern counts");
-                @memcpy(name_bytes[n_at..][0..name.len], name);
-                names[cap.index] = name_bytes[n_at..][0..name.len];
-                n_at += name.len;
-            },
-            else => {},
-        };
+        const named_groups = try GroupNames.of(gpa, named);
 
         return .{
             .states = out_states,
@@ -1030,9 +989,9 @@ const Builder = struct {
             .alternatives = out_alts,
             .start_anchored = map.id(starts.anchored),
             .start_unanchored = map.id(starts.unanchored),
-            .groups = groups,
-            .names = names,
-            .name_bytes = name_bytes,
+            .groups = named_groups.groups,
+            .names = named_groups.names,
+            .name_bytes = named_groups.bytes,
             .looks = looks,
             .utf8 = utf8_mode,
             .empty_ok = starts.empty_ok,
@@ -1056,13 +1015,74 @@ const Move = struct {
     }
 };
 
+/// Takes each empty state in `remap` to the kept state its chain leads to. A chain of empty
+/// states leads to one that is not: the compiler never closes a loop of them, since every loop
+/// it makes passes an alternation.
+fn skipEmpty(states: []const BState, remap: []u32) void {
+    for (states, 0..) |s, i| {
+        if (s != .empty or remap[i] != unset) continue;
+        var target = i;
+        var steps: usize = 0;
+        while (states[target] == .empty and remap[target] == unset) : (steps += 1) {
+            aegis.assert.invariant(steps < states.len, "no loop of empty states");
+            target = states[target].empty;
+            aegis.assert.invariant(target != unset, "every empty state is joined to what follows");
+        }
+        const final = remap[target];
+        var k = i;
+        while (states[k] == .empty and remap[k] == unset) {
+            remap[k] = final;
+            k = states[k].empty;
+        }
+    }
+}
+
+/// The automaton's groups and their names, read from `named`; null, a set's, has only the whole
+/// match. The names are copied into one allocation, `bytes`.
+const GroupNames = struct {
+    groups: u32,
+    names: []?[]const u8,
+    bytes: []u8,
+
+    fn of(gpa: Allocator, named: ?*const Hir) Allocator.Error!GroupNames {
+        const no_nodes: []const Hir.Node = &.{};
+        const nodes = if (named) |h| h.nodes else no_nodes;
+        const groups = if (named) |h| h.captures + 1 else 1;
+        const names = try gpa.alloc(?[]const u8, groups);
+        errdefer gpa.free(names);
+        @memset(names, null);
+        var name_len: usize = 0;
+        for (nodes) |node| switch (node) {
+            .capture => |cap| if (cap.name) |name| {
+                name_len += name.len;
+            },
+            else => {},
+        };
+        const bytes = try gpa.alloc(u8, name_len);
+        errdefer gpa.free(bytes);
+        var n_at: usize = 0;
+        for (nodes) |node| switch (node) {
+            .capture => |cap| if (cap.name) |name| {
+                aegis.assert.invariant(cap.index < groups, "a group's number is one the pattern counts");
+                @memcpy(bytes[n_at..][0..name.len], name);
+                names[cap.index] = bytes[n_at..][0..name.len];
+                n_at += name.len;
+            },
+            else => {},
+        };
+        return .{ .groups = groups, .names = names, .bytes = bytes };
+    }
+};
+
 const Remap = struct {
     remap: []const u32,
+    /// The states kept: every state a reference is taken to lies below.
+    len: u32,
 
     fn id(m: Remap, state: u32) Nfa.StateId {
         aegis.assert.invariant(state != unset, "every state is joined to what follows");
         const r = m.remap[state];
         aegis.assert.invariant(r != unset, "an empty state leads to one that is kept");
-        return @fromBackingInt(r);
+        return Nfa.StateId.from(r, m.len) catch aegis.assert.never("an empty state leads to one that is kept");
     }
 };

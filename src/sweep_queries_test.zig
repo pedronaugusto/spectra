@@ -75,7 +75,7 @@ const Queries = struct {
         var s = try q.auto.start(q.walk, .{});
         var at: usize = 0;
         while (true) {
-            const end = std.mem.indexOfScalarPos(u8, subject, at, '/') orelse subject.len;
+            const end = std.mem.findScalarPos(u8, subject, at, '/') orelse subject.len;
             for (subject[at..end]) |b| s = try q.auto.step(q.walk, s, b);
             const ended = try q.auto.stepEnd(q.walk, s);
             const matched = q.auto.patterns(q.walk, ended);

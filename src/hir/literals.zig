@@ -376,7 +376,7 @@ pub const Extractor = struct {
                     const kids = hir.childrenOf(s);
                     if (frame.at == 0) {
                         frame.acc = .empty;
-                    } else try e.union_(arena, &frame.acc, &done);
+                    } else try e.unite(arena, &frame.acc, &done);
                     if (!frame.acc.isFinite() or frame.at == kids.len) break :blk frame.acc;
                     frame.at += 1;
                     try stack.append(arena, .{ .node = kids[frame.at - 1] });
@@ -397,10 +397,10 @@ pub const Extractor = struct {
             if (r.max != 1) sub.makeInexact();
             var nothing = try Seq.singleton(arena, .{ .bytes = &.{}, .exact = true });
             if (r.greedy) {
-                try e.union_(arena, sub, &nothing);
+                try e.unite(arena, sub, &nothing);
                 return sub.*;
             }
-            try e.union_(arena, &nothing, sub);
+            try e.unite(arena, &nothing, sub);
             return nothing;
         }
         var seq = try Seq.singleton(arena, .{ .bytes = &.{}, .exact = true });
@@ -472,7 +472,7 @@ pub const Extractor = struct {
 
     /// `seq` then `other`, where both fit `limit_total`; past it, each cut to four bytes (what
     /// a Teddy search takes) to make room, and if that is not enough, infinite.
-    fn union_(e: Extractor, arena: Allocator, seq: *Seq, other: *Seq) Allocator.Error!void {
+    fn unite(e: Extractor, arena: Allocator, seq: *Seq, other: *Seq) Allocator.Error!void {
         if (seq.len()) |a| if (other.len()) |b| if (a +| b > e.limit_total) {
             switch (e.kind) {
                 .prefix => {

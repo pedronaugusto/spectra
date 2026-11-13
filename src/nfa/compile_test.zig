@@ -2,6 +2,7 @@
 //! by a bounded backtracker over it, here only), UTF-8 classes checked code point by code point
 //! and minimal, what is charged and refused, and any pattern compiled whole.
 const std = @import("std");
+const sequence = @import("../utf8.zig");
 const shakedown = @import("shakedown");
 const Ast = @import("../syntax/Ast.zig");
 const parse_mod = @import("../syntax/parse.zig");
@@ -457,7 +458,7 @@ test "the automaton of any scalar refuses every byte string that is not UTF-8" {
 fn valid(bytes: []const u8) bool {
     const n = std.unicode.utf8ByteSequenceLength(bytes[0]) catch return false;
     if (n != bytes.len) return false;
-    _ = std.unicode.utf8Decode(bytes) catch return false;
+    _ = sequence.decode(bytes) catch return false;
     return true;
 }
 

@@ -1,0 +1,25 @@
+{
+  "seams": [
+    {
+      "file": "src/kernels/x86_ssse3.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "Teddy's shuffle as SSSE3's PSHUFB, one instruction on 16-byte vectors in registers, which Zig's vector builtins do not lower to; the kernel is entered only where the CPU reports SSSE3"
+    },
+    {
+      "file": "src/kernels/x86_avx2.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "Teddy's shuffle as AVX2's VPSHUFB, one instruction on 32-byte vectors in registers, which Zig's vector builtins do not lower to; the kernel is entered only where the CPU reports AVX2"
+    },
+    {
+      "file": "src/kernels/arm_neon.zig",
+      "rules": [
+        "P007"
+      ],
+      "reason": "Teddy's shuffle as NEON's TBL, one instruction on 16-byte vectors in registers, which Zig's vector builtins do not lower to; the kernel is entered only where the CPU reports NEON"
+    }
+  ]
+}

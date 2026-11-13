@@ -313,7 +313,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         }
         const w = want.matches[k];
         const compared = if (want.groups_given) groups else groups[0..1];
-        if (w.len != compared.len or !std.meta.eql(w, compared) and !spansEql(w, compared)) {
+        if (w.len != compared.len or (!std.meta.eql(w, compared) and !spansEql(w, compared))) {
             std.debug.print("{s}/{s}: /{s}/ {t}: captures {d}: {any}, want {any}\n", .{ file, name, pattern, engines, k, compared, w });
             tally.failed += 1;
             return false;
@@ -351,7 +351,7 @@ fn runSet(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, li
         tally.skipped_sets += 1;
         return;
     };
-    if (list.len == 0 or text(t, "line-terminator") != null and !std.mem.eql(u8, text(t, "line-terminator").?, "\n")) {
+    if (list.len == 0 or (text(t, "line-terminator") != null and !std.mem.eql(u8, text(t, "line-terminator").?, "\n"))) {
         tally.skipped_sets += 1;
         return;
     }

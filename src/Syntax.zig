@@ -1,5 +1,4 @@
 //! How a pattern is read: its dialect and the flags it starts with.
-const Syntax = @This();
 
 dialect: Dialect = .rust,
 /// Classes and `.` over code points, and Unicode classes and case folding; false: ASCII's.

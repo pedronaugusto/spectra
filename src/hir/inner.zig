@@ -48,6 +48,7 @@ const Allocator = std.mem.Allocator;
 const Hir = @import("../Hir.zig");
 const suffix = @import("suffix.zig");
 const literals = @import("literals.zig");
+const aegis = @import("aegis");
 
 /// The children of the pattern's top concatenation, through capture groups, or null where
 /// the pattern is not one.
@@ -70,7 +71,7 @@ pub fn rootedAt(hir: *const Hir, index: Hir.Index) Hir {
 /// The pattern P: the top concatenation's first `at` children, as a pattern of its own (its
 /// nodes, and one concatenation of them where there are two or more).
 pub fn prefix(arena: Allocator, hir: *const Hir, kids: []const Hir.Index, at: usize) Allocator.Error!Hir {
-    std.debug.assert(at >= 1 and at < kids.len);
+    aegis.assert.invariant(at >= 1 and at < kids.len, "at >= 1 and at < kids.len");
     if (at == 1) return rootedAt(hir, kids[0]);
     const nodes = try arena.alloc(Hir.Node, hir.nodes.len + 1);
     @memcpy(nodes[0..hir.nodes.len], hir.nodes);

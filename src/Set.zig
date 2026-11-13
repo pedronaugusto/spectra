@@ -101,7 +101,7 @@ pub fn compile(gpa: Allocator, sources: []const aegis.input.Untrusted([]const u8
     errdefer nfa.deinit(gpa);
     const all = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .all);
     const leftmost = lazy.build(&nfa, options.limits.lazy_dfa.raw(), .forward, .leftmost_first);
-    if ((cacheBytesOf(&nfa, all, leftmost) orelse std.math.maxInt(usize)) > options.limits.cache.raw()) {
+    if (aegis.units.Bytes(usize).fromRaw(cacheBytesOf(&nfa, all, leftmost) orelse std.math.maxInt(usize)).compare(options.limits.cache) == .gt) {
         if (options.diagnostic) |d| d.* = .{ .reason = .cache_too_large };
         return error.TooLarge;
     }
@@ -210,26 +210,28 @@ pub const Patterns = struct {
     /// The lowest pattern that matched.
     pub fn first(p: *const Patterns) ?Pattern {
         const at = p.bits.findFirstSet() orelse return null;
-        return @fromBackingInt(@as(u32, @intCast(at)));
+        return Pattern.from(@intCast(at), p.bits.bit_length) catch aegis.assert.never("a set bit is a pattern of the set");
     }
 
     /// The highest pattern that matched (gitignore's last match).
     pub fn last(p: *const Patterns) ?Pattern {
         const at = p.bits.findLastSet() orelse return null;
-        return @fromBackingInt(@as(u32, @intCast(at)));
+        return Pattern.from(@intCast(at), p.bits.bit_length) catch aegis.assert.never("a set bit is a pattern of the set");
     }
 
     /// The patterns that matched, lowest first.
     pub fn iterator(p: *const Patterns) Iterator {
-        return .{ .inner = p.bits.iterator(.{}) };
+        return .{ .inner = p.bits.iterator(.{}), .len = p.bits.bit_length };
     }
 
     pub const Iterator = struct {
         inner: std.DynamicBitSetUnmanaged.Iterator(.{}),
+        /// The set's pattern count: every bit the iterator finds lies below it.
+        len: usize,
 
         pub fn next(it: *Iterator) ?Pattern {
             const at = it.inner.next() orelse return null;
-            return @fromBackingInt(@as(u32, @intCast(at)));
+            return Pattern.from(@intCast(at), it.len) catch aegis.assert.never("a set bit is a pattern of the set");
         }
     };
 };
@@ -286,7 +288,8 @@ pub fn first(set: *const Set, c: *Cache, input: Input) SearchError!?Match {
         c.scratch.unsetAll();
         if (set.searchAll(c, input, &c.scratch) == 0) return null;
         const lowest: u32 = @intCast(c.scratch.findFirstSet().?);
-        return .{ .span = input.span, .index = @fromBackingInt(lowest), .set = set.id };
+        const index = Pattern.from(lowest, set.len()) catch aegis.assert.never("a set bit is a pattern of the set");
+        return .{ .span = input.span, .index = index, .set = set.id };
     }
     var cut = input;
     if (set.leftmost) |*d| {
@@ -304,7 +307,8 @@ pub fn first(set: *const Set, c: *Cache, input: Input) SearchError!?Match {
         aegis.assert.invariant(c.last != .lazy_dfa, "the match the lazy DFA found is found again");
         return null;
     };
-    return .{ .span = .{ .start = slots[0].?, .end = slots[1].? }, .index = @fromBackingInt(c.pike.pattern), .set = set.id };
+    const index = Pattern.from(c.pike.pattern, set.len()) catch aegis.assert.never("the PikeVM's match belongs to a pattern of the set");
+    return .{ .span = .{ .start = slots[0].?, .end = slots[1].? }, .index = index, .set = set.id };
 }
 
 fn checkCache(set: *const Set, c: *const Cache) void {

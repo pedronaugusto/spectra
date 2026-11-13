@@ -6,6 +6,7 @@
 //! A code point set spans U+0000 to U+10FFFF, surrogates included: the ECMAScript dialect can
 //! name one. A set is held to scalar values where it is compiled to UTF-8.
 const std = @import("std");
+const utf8 = @import("../utf8.zig");
 const aegis = @import("aegis");
 const xenoglyph = @import("xenoglyph");
 const Allocator = std.mem.Allocator;
@@ -262,7 +263,7 @@ pub fn ecmaCanonicalize(unit: u21) u21 {
     const upper = w.buffered();
     const length = std.unicode.utf8ByteSequenceLength(upper[0]) catch aegis.assert.never("xenoglyph writes UTF-8");
     if (length != upper.len) return unit;
-    const cu = std.unicode.utf8Decode(upper) catch aegis.assert.never("xenoglyph writes UTF-8");
+    const cu = utf8.decode(upper) catch aegis.assert.never("xenoglyph writes UTF-8");
     if (cu > 0xffff) return unit;
     if (unit >= 0x80 and cu < 0x80) return unit;
     return cu;

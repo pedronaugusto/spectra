@@ -57,7 +57,8 @@ defer re.deinit();
 var cache = try re.cache(gpa);
 defer cache.deinit(gpa);
 const m = (try re.find(&cache, .of("a"))).?;
-std.debug.assert(m.start == 0 and m.end == 1);
+std.debug.assert(m.start == 0);
+std.debug.assert(m.end == 1);
 // Whether a pattern is valid ECMA-262, whatever spectra runs.
 std.debug.assert(try spectra.ecmascript.validate(gpa, .init("(?<year>\\d{4})-\\k<year>"), "u", .{}, null));
 ```
@@ -75,7 +76,8 @@ var d: spectra.Regex.Diagnostic = .{};
 const got = spectra.Regex.compile(gpa, .init("(a)\\1"), .{ .syntax = .{ .dialect = .ecmascript }, .diagnostic = &d });
 std.debug.assert(got == error.Unsupported);
 std.debug.assert(d.reason == .unsupported_backreference);
-std.debug.assert(d.span.start == 3 and d.span.end == 5);
+std.debug.assert(d.span.start == 3);
+std.debug.assert(d.span.end == 5);
 ```
 <!-- END GENERATED -->
 

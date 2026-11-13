@@ -3,15 +3,15 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0x47cb32ef08c6a0b7,
-    .paths = .{ "build.zig", "build.zig.zon", "src", "docs/design.md", "README.md", "CHANGELOG.md", "LICENSE", "LICENSES" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE", "LICENSES" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#c8982a86cbd8a85ac9941df59b6c36a10a252355",
-            .hash = "aegis-0.2.4-rsxouvwTDACNY2hXYVwyUefGiHkfV4nV6HBftNXJRliQ",
+            .url = "git+https://github.com/pedronaugusto/aegis#a0c467e1c6a65c24b75e4068c495703a94aee35e",
+            .hash = "aegis-0.2.4-rsxouj9yDQC9CdjMRwruqDGlipK_lKHyS_JODaoIQp4t",
         },
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#e8853a0a08813ec83f4c1dfa06277790d4445111",
-            .hash = "xenoglyph-0.5.1-YKXZlR-OUwCe2E6P8lQFfUMnk2dOwWnWc95sJTEkd7QK",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#0c897695ed6c42c66b38b4833c2d0df6a6066533",
+            .hash = "xenoglyph-0.5.1-YKXZldb6UwAjmrQHbQpV1LeY_LSqe2JtplvhE1SCnFAN",
         },
         .ladar = .{
             .url = "git+https://github.com/pedronaugusto/ladar#1464cbdb95e891c7d7e5a59351d2de0ca238f997",
@@ -20,12 +20,12 @@
     },
     .dev_dependencies = .{
         .shakedown = .{
-            .url = "git+https://github.com/pedronaugusto/shakedown#acd95d337b222e0223e60b923b5abae8d33bfaf2",
-            .hash = "shakedown-0.6.0-BR8U435LGADOWAz8MqgysJwuG83P_RkOlBLEo8e130Sm",
+            .url = "git+https://github.com/pedronaugusto/shakedown#9005b65d81e8efab8bda86bf5001de6351717fe0",
+            .hash = "shakedown-0.6.0-BR8U40gRGwA1j8mnIfkc4u_U4meNZwr9_YRrNv4zVzTM",
         },
         .preflight = .{
-            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#454b12e663bf57993890ba18a06f33df619a659e",
-            .hash = "preflight-0.18.6-LX1ZwhfdGABszxizm4q2gQoTUwWG3UbYWnTZlnuZIxg5",
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#de5dcd1dd1755e0c001a589c198de348859a7d8f",
+            .hash = "preflight-0.18.6-LX1ZwjrjGQAN3T-u8gJBPcFvd1wCaZ5ww95X7SzxgDaP",
         },
         .strand = .{
             .url = "git+https://github.com/pedronaugusto/strand#ea21420bd71a8e813735daeda0325663c5194afa",
