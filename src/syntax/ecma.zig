@@ -251,8 +251,7 @@ const Parser = struct {
             const b = p.peek() orelse break;
             switch (b) {
                 '(' => {
-                    const most_nesting = p.limits.nesting.raw();
-                    if (stack.items.len > most_nesting) return p.tooLarge(start, .nesting_too_deep);
+                    if (stack.items.len > p.limits.nesting.widen(usize)) return p.tooLarge(start, .nesting_too_deep);
                     p.at += 1;
                     const opened = try p.groupOpening(start, stack.items);
                     try stack.append(p.arena, opened);
@@ -485,8 +484,7 @@ const Parser = struct {
         var value: u64 = 0;
         for (digits) |d| {
             value = @min(value * 10 + (d - '0'), std.math.maxInt(u32));
-            const most_repeats = p.limits.repetition.raw();
-            if (!p.validating and value > most_repeats) return p.tooLarge(start, .repetition_count_too_large);
+            if (!p.validating and value > p.limits.repetition.widen(u64)) return p.tooLarge(start, .repetition_count_too_large);
         }
         return @intCast(value);
     }
@@ -855,8 +853,7 @@ const Parser = struct {
                 continue;
             }
             if (b == '[') {
-                const most_nesting = p.limits.nesting.raw();
-                if (levels.items.len >= most_nesting) return p.tooLarge(at, .nesting_too_deep);
+                if (levels.items.len >= p.limits.nesting.widen(usize)) return p.tooLarge(at, .nesting_too_deep);
                 try p.openSetLevel(&levels);
                 continue;
             }

@@ -165,8 +165,7 @@ const Parser = struct {
             const b = p.peek() orelse break;
             switch (b) {
                 '(' => {
-                    const most_nesting = p.limits.nesting.raw();
-                    if (stack.items.len > most_nesting) return p.tooLarge(start, .nesting_too_deep);
+                    if (stack.items.len > p.limits.nesting.widen(usize)) return p.tooLarge(start, .nesting_too_deep);
                     p.at += 1;
                     if (try p.groupOpening(start, frame)) |opened| {
                         try stack.append(p.arena, opened);
@@ -361,8 +360,7 @@ const Parser = struct {
         while (p.peek()) |c| {
             if (!std.ascii.isDigit(c)) break;
             value = value * 10 + (c - '0');
-            const most_repeats = p.limits.repetition.raw();
-            if (value > most_repeats) return p.tooLarge(start, .repetition_count_too_large);
+            if (value > p.limits.repetition.widen(u64)) return p.tooLarge(start, .repetition_count_too_large);
             p.at += 1;
         }
         if (p.at == digits) return p.fail(start, p.at, .repetition_count_invalid);
@@ -535,8 +533,7 @@ const Parser = struct {
                     try level.items.append(p.arena, .{ .ascii = ascii });
                     continue;
                 }
-                const most_nesting = p.limits.nesting.raw();
-                if (levels.items.len >= most_nesting) return p.tooLarge(at, .nesting_too_deep);
+                if (levels.items.len >= p.limits.nesting.widen(usize)) return p.tooLarge(at, .nesting_too_deep);
                 try p.openLevel(&levels);
                 continue;
             }

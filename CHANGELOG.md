@@ -14,6 +14,7 @@ follow [Semantic Versioning](https://semver.org/).
 - `Set.Patterns.Iterator` holds the set's pattern count, `len`, beside the bit iterator, and makes each pattern
   through `Pattern.from`; a bit past the count stops the program in every build.
 - The package no longer ships docs/design.md; it stays in the repository.
+- Pins aegis dc3ed602, still 0.2.4: the parsers read the nesting and repetition limits through `Ranged.widen`.
 
 ### Added
 
