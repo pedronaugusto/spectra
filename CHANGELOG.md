@@ -8,6 +8,7 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Development on preflight's ci-standard f991816 and shakedown 327bc61. The release tier's test jobs, the hardened and ThreadSanitizer runs among them, take 40 minutes: the ThreadSanitizer build and its suite passed the default 20.
 - In the ECMAScript dialect, `findAll` (and so `replace`) iterates as a global `exec` does: an empty match right after
   a match is reported, so a caller may see one more empty match than before; after an empty match the search moves on
   one character. The Rust dialect keeps regex's rule.
@@ -15,6 +16,10 @@ follow [Semantic Versioning](https://semver.org/).
   through `Pattern.from`; a bit past the count stops the program in every build.
 - The package no longer ships docs/design.md; it stays in the repository.
 - Pins aegis dc3ed602, still 0.2.4: the parsers read the nesting and repetition limits through `Ranged.widen`.
+
+### Fixed
+
+- The work translation and compilation are charged no longer depends on the allocator they run in: a list's growth is charged what it adds whether the allocator grows it in place or the list moves, where a move was charged what it added and its whole new length besides. Whether an arena has room in place depends on what it holds and on the machine's page size, so a pattern's charge differed by machine (a class naming one property many times was charged more on aarch64 Linux than its test allows).
 
 ### Added
 
