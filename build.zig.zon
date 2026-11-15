@@ -6,16 +6,16 @@
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE", "LICENSES" },
     .dependencies = .{
         .aegis = .{
-            .url = "git+https://github.com/pedronaugusto/aegis#dc3ed602f9c18b4473e9c649d1b1f36403603018",
-            .hash = "aegis-0.2.4-rsxouheoDQB7ckAmyiNbPdOdlqJnN1Sj56bM7_iPKhpY",
+            .url = "git+https://github.com/pedronaugusto/aegis#f52eabef3ec6534c3a74bea3a3b7d95a91ce2581",
+            .hash = "aegis-0.2.4-rsxouoquDQApwYDuGdd2YyEeTeNp6CnJoOZKdVCfc3jt",
         },
         .xenoglyph = .{
-            .url = "git+https://github.com/pedronaugusto/xenoglyph#0c897695ed6c42c66b38b4833c2d0df6a6066533",
-            .hash = "xenoglyph-0.5.1-YKXZldb6UwAjmrQHbQpV1LeY_LSqe2JtplvhE1SCnFAN",
+            .url = "git+https://github.com/pedronaugusto/xenoglyph#ab4d38189cb723e4f102b611ed818380da56c750",
+            .hash = "xenoglyph-0.5.1-YKXZlcMCVABOnefwWET72nJLsmnBsMepiQwrB2Ll5HI9",
         },
         .ladar = .{
-            .url = "git+https://github.com/pedronaugusto/ladar#1464cbdb95e891c7d7e5a59351d2de0ca238f997",
-            .hash = "ladar-0.0.0-fezdEgNQAAAa6mzfw3ND7CbhvccdiC8I09QuC9Nf4_rk",
+            .url = "git+https://github.com/pedronaugusto/ladar#ee89780739434a8a1e1e7a9d94fceedc63ab0238",
+            .hash = "ladar-0.0.0-fezdEm6LAAAVMk4Fy0rdS7ToIaGTrwYCmj6X8a0Cm0an",
         },
     },
     .dev_dependencies = .{
