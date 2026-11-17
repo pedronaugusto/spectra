@@ -1096,6 +1096,13 @@ test "Teddy runs on the widest kernel this CPU has, says which, and finds what a
     if (comptime builtin.cpu.arch == .x86_64 and ladar.available(.x86_avx2)) {
         if (ladar.has(.x86_avx2)) try testing.expectEqual(prefilter.Kernel.x86_avx2, kernel.?);
     }
+    // The "Teddy on AVX2" job's build: it exists to show the AVX2 kernel ran, so any other
+    // CPU or build fails it by name, never passing on SSSE3.
+    if (@import("teddy_job").require_avx2) {
+        if (comptime builtin.cpu.arch != .x86_64 or !ladar.available(.x86_avx2)) return error.Avx2KernelNotBuilt;
+        if (!ladar.has(.x86_avx2)) return error.CpuHasNoAvx2;
+        try testing.expectEqual(prefilter.Kernel.x86_avx2, kernel.?);
+    }
     const k = kernel orelse return;
     var state: std.heap.ArenaAllocator = .init(gpa);
     defer state.deinit();

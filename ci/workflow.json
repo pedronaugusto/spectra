@@ -14,5 +14,18 @@
   ],
   "compile_once": true,
   "hardened": true,
-  "test_job_timeout": 40
+  "test_job_timeout": 40,
+  "jobs": [
+    {
+      "name": "Teddy on AVX2",
+      "step": "teddy-avx2",
+      "os": [
+        "ubuntu-latest"
+      ],
+      "tiers": [
+        "release"
+      ],
+      "timeout": 30
+    }
+  ]
 }

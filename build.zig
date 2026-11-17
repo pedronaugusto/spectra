@@ -63,22 +63,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const package = b.dependency("spectra", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const filters = if (test_filter) |filter| &.{filter} else &.{};
-    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
-    const strand = b.dependency("strand", .{ .target = target, .optimize = optimize });
-    const test_module = b.createModule(.{
-        .root_source_file = p.path("src/tests.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "shakedown", .module = shakedown.module("shakedown") },
-            .{ .name = "strand", .module = strand.module("strand") },
-            .{ .name = "regex_suite", .module = regexSuite(b, p) },
-            .{ .name = "v8_verdicts", .module = embedded(b, p, "testdata/v8/matches.json") },
-            .{ .name = "v8_replace", .module = embedded(b, p, "testdata/v8/replace.json") },
-        },
-    });
-    addSourceImports(b, p, test_module, target, optimize);
-    const tests = b.addTest(.{ .name = "spectra-tests", .filters = filters, .root_module = test_module });
+    const tests = b.addTest(.{ .name = "spectra-tests", .filters = filters, .root_module = testModule(b, p, target, optimize, false) });
     const check = b.step("check", "Compile the tests without running them");
     const test_step = b.step("test", "Run the tests");
     test_step.dependOn(&b.addRunArtifact(tests).step);
@@ -93,6 +78,13 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_step.dependOn(examples);
     check.dependOn(&example.step);
     b.getInstallStep().dependOn(&tests.step);
+    // The release tier's "Teddy on AVX2" job (ci/workflow.json): the Teddy test alone, ReleaseFast
+    // (LLVM, so ladar reports what the CPU has), required to run the AVX2 kernel, its line naming
+    // the kernel in the job's log. A CPU without AVX2 fails it: it never passes on SSSE3.
+    const teddy = b.addTest(.{ .name = "teddy-avx2", .filters = &.{"Teddy runs on the widest kernel"}, .root_module = testModule(b, p, target, .ReleaseFast, true) });
+    const teddy_run = b.addRunArtifact(teddy);
+    teddy_run.stdio = .inherit;
+    b.step("teddy-avx2", "Run the Teddy test on this CPU's AVX2 kernel, ReleaseFast; fails where the CPU has no AVX2").dependOn(&teddy_run.step);
     // The release tier runs every property under Zig's fuzzer (each shakedown property is a
     // fuzz target: the parsers, translation, compilation and every engine against its oracle)
     // and the suite with safety on.
@@ -108,6 +100,30 @@ pub fn dev(b: *std.Build, tools: type) void {
             .optimize = optimize,
         },
     });
+}
+
+/// The tests' module. `require_avx2` is the "Teddy on AVX2" job's: its Teddy test fails unless
+/// the AVX2 kernel runs.
+fn testModule(b: *std.Build, p: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize, require_avx2: bool) *std.Build.Module {
+    const shakedown = b.dependency("shakedown", .{ .target = target, .optimize = optimize });
+    const strand = b.dependency("strand", .{ .target = target, .optimize = optimize });
+    const job = b.addOptions();
+    job.addOption(bool, "require_avx2", require_avx2);
+    const module = b.createModule(.{
+        .root_source_file = p.path("src/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "shakedown", .module = shakedown.module("shakedown") },
+            .{ .name = "strand", .module = strand.module("strand") },
+            .{ .name = "regex_suite", .module = regexSuite(b, p) },
+            .{ .name = "v8_verdicts", .module = embedded(b, p, "testdata/v8/matches.json") },
+            .{ .name = "v8_replace", .module = embedded(b, p, "testdata/v8/replace.json") },
+            .{ .name = "teddy_job", .module = job.createModule() },
+        },
+    });
+    addSourceImports(b, p, module, target, optimize);
+    return module;
 }
 
 /// spectra again, in the mode a benchmark builds in: an imported module keeps its own mode, so a
