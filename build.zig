@@ -63,6 +63,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     const package = b.dependency("spectra", .{ .target = target, .optimize = optimize });
     const p = package.builder;
     const filters = if (test_filter) |filter| &.{filter} else &.{};
+    const teddy_avx2 = b.option(bool, "teddy-avx2", "The Teddy on AVX2 job's build: the tests take the Teddy test that fails unless the AVX2 kernel runs") orelse false;
     const tests = b.addTest(.{ .name = "spectra-tests", .filters = filters, .root_module = testModule(b, p, target, optimize, false) });
     const check = b.step("check", "Compile the tests without running them");
     const test_step = b.step("test", "Run the tests");
@@ -78,13 +79,17 @@ pub fn dev(b: *std.Build, tools: type) void {
     test_step.dependOn(examples);
     check.dependOn(&example.step);
     b.getInstallStep().dependOn(&tests.step);
-    // The release tier's "Teddy on AVX2" job (ci/workflow.json): the Teddy test alone, ReleaseFast
-    // (LLVM, so ladar reports what the CPU has), required to run the AVX2 kernel, its line naming
-    // the kernel in the job's log. A CPU without AVX2 fails it: it never passes on SSSE3.
-    const teddy = b.addTest(.{ .name = "teddy-avx2", .filters = &.{"Teddy runs on the widest kernel"}, .root_module = testModule(b, p, target, .ReleaseFast, true) });
-    const teddy_run = b.addRunArtifact(teddy);
-    teddy_run.stdio = .inherit;
-    b.step("teddy-avx2", "Run the Teddy test on this CPU's AVX2 kernel, ReleaseFast; fails where the CPU has no AVX2").dependOn(&teddy_run.step);
+    // The release tier's "Teddy on AVX2" job (ci/workflow.json, `-Dteddy-avx2=true`): the Teddy
+    // test alone, ReleaseFast (LLVM, so ladar reports what the CPU has), required to run the AVX2
+    // kernel, its line naming the kernel in the job's log. A CPU without AVX2 fails it: it never
+    // passes on SSSE3. It joins the tests before addCi, so preflight's runner runs it.
+    const teddy_step = b.step("teddy-avx2", "Run the Teddy test on this CPU's AVX2 kernel, ReleaseFast (-Dteddy-avx2=true); fails where the CPU has no AVX2");
+    if (teddy_avx2) {
+        const teddy = b.addTest(.{ .name = "teddy-avx2", .filters = &.{"Teddy runs on the widest kernel"}, .root_module = testModule(b, p, target, .ReleaseFast, true) });
+        const teddy_run = b.addRunArtifact(teddy);
+        test_step.dependOn(&teddy_run.step);
+        teddy_step.dependOn(&teddy_run.step);
+    } else teddy_step.dependOn(&b.addFail("teddy-avx2 is the Teddy on AVX2 job's build: run it with -Dteddy-avx2=true").step);
     // The release tier runs every property under Zig's fuzzer (each shakedown property is a
     // fuzz target: the parsers, translation, compilation and every engine against its oracle)
     // and the suite with safety on.

@@ -19,6 +19,9 @@
     {
       "name": "Teddy on AVX2",
       "step": "teddy-avx2",
+      "args": [
+        "-Dteddy-avx2=true"
+      ],
       "os": [
         "ubuntu-latest"
       ],
