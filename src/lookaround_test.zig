@@ -331,6 +331,52 @@ fn spanAgrees(re: *const Regex, c: *Regex.Cache, alone: *const Regex, ac: *Regex
     reached.spans += 1;
 }
 
+test "a span search past where a lookbehind's lane died reads the byte before its start" {
+    // The hardened fuzz run's case (release run 44120371024), shrunk: `^`'s lane dies after
+    // position 0, and the search from 1 took the dead state's context for the byte before it, so
+    // `\b` at the end of "aa" saw no word before it.
+    const shrunk = [_]struct { pattern: []const u8, haystack: []const u8, start: usize, end: usize, want: ?Regex.Span }{
+        .{ .pattern = "(?<!^)\\b", .haystack = "aa", .start = 1, .end = 2, .want = span(2, 2) },
+        .{ .pattern = "(?<!^)\\B", .haystack = "aa", .start = 1, .end = 1, .want = span(1, 1) },
+        .{ .pattern = "(?<!^a)\\b", .haystack = "aab", .start = 2, .end = 3, .want = span(3, 3) },
+    };
+    for (shrunk) |case| {
+        var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = ecma });
+        defer re.deinit();
+        var c = try re.cache(gpa);
+        defer c.deinit(gpa);
+        const input: Regex.Input = .{ .haystack = case.haystack, .span = .{ .start = case.start, .end = case.end } };
+        try testing.expectEqual(case.want, try re.find(&c, input));
+        try testing.expectEqual(.lookaround_lazy_dfa, c.last);
+    }
+    // The class: lanes that die (bodies anchored at the start, nested or not) before every look
+    // that reads the byte before, over every span, as the PikeVM alone finds.
+    const patterns = [_][]const u8{
+        "(?<!^)\\b",        "(?<!^)\\B",       "(?<!^a)\\b",      "(?<=^a)\\b",    "(?<!^)(?=\\b)",
+        "(?<=(?<!^)a)\\b",  "(?<!^(?=a))\\B",  "(?<!^)(?:\\b|$)", "(?<!^)\\b\\w*", "(?<!^a)(?<!^)\\B",
+        "(?<!^)\\b(?<!^a)", "(?<!(?<!^)a)\\B",
+    };
+    const haystacks = [_][]const u8{ "aa", "aa ", "a a", " a", "ab\n", "a", "\na" };
+    var lazy_runs: usize = 0;
+    for (patterns) |pattern| {
+        var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma });
+        defer re.deinit();
+        var c = try re.cache(gpa);
+        defer c.deinit(gpa);
+        var alone = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
+        defer alone.deinit();
+        var ac = try alone.cache(gpa);
+        defer ac.deinit(gpa);
+        for (haystacks) |haystack| for (1..haystack.len + 1) |start| for (start..haystack.len + 1) |end| {
+            const input: Regex.Input = .{ .haystack = haystack, .span = .{ .start = start, .end = end } };
+            errdefer std.debug.print("/{s}/ on {any} [{d}, {d})\n", .{ pattern, haystack, start, end });
+            try testing.expectEqual(try alone.find(&ac, input), try re.find(&c, input));
+            if (c.last == .lookaround_lazy_dfa) lazy_runs += 1;
+        };
+    }
+    try testing.expect(lazy_runs > 200);
+}
+
 test "fuzz: every search of a pattern with lookarounds is what ECMA-262's matcher finds, nested both ways" {
     reached = .{};
     try shakedown.check(gpa, {}, anySearch, .{ .cases = 4000, .seed = 0x10a4 });

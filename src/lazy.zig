@@ -577,9 +577,7 @@ fn searchOnce(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, pre: ?*co
             c.skipped += next_at - at;
             if (next_at > at) {
                 at = next_at;
-                const before = input.haystack[at - 1];
-                if (d.quit != null and before >= 0x80) return error.Quit;
-                s = try startOf(nfa, d, c, d.kinds[before], false);
+                s = try startOf(nfa, d, c, try contextBefore(d, input.haystack, at), false);
             }
             if (tries >= 16 and skipped < 4 * tries) prefilter = null;
         };
@@ -695,13 +693,16 @@ pub fn deadOf(c: *const Cache, s: u32) bool {
 }
 
 fn startState(nfa: *const Nfa, d: *const Dfa, c: *Cache, input: Input, anchored: bool) Error!u32 {
-    const at = input.span.start;
-    const context: Context = if (at == 0) d.start else blk: {
-        const b = input.haystack[at - 1];
-        if (d.quit != null and b >= 0x80) return error.Quit;
-        break :blk d.kinds[b];
-    };
-    return startOf(nfa, d, c, context, anchored);
+    return startOf(nfa, d, c, try contextBefore(d, input.haystack, input.span.start), anchored);
+}
+
+/// What the looks at `at` read behind it: the haystack's start, or the byte before. A search's
+/// start state takes it, from 0 or past lanes stepped to its start, never a stepped state's.
+fn contextBefore(d: *const Dfa, haystack: []const u8, at: usize) Error!Context {
+    if (at == 0) return d.start;
+    const b = haystack[at - 1];
+    if (d.quit != null and b >= 0x80) return error.Quit;
+    return d.kinds[b];
 }
 
 fn startOf(nfa: *const Nfa, d: *const Dfa, c: *Cache, context: Context, anchored: bool) Error!u32 {
@@ -749,7 +750,9 @@ fn lanesTo(nfa: *const Nfa, d: *const Dfa, c: *Cache, haystack: []const u8, at: 
     const keys = c.joined[0 .. rec.len + 1];
     @memcpy(keys[0..rec.len], c.keys[rec.start..][0..rec.len]);
     keys[rec.len] = seed;
-    return c.intern(d, &s, rec.context, false, keys, keys.len);
+    // The lanes may all have died on the way (a body anchored at the haystack's start), and the
+    // dead state holds no byte's context.
+    return c.intern(d, &s, try contextBefore(d, haystack, at), false, keys, keys.len);
 }
 
 /// Where in a row the transition on `unit` (a class, or the end) under column `col` lives.

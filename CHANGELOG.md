@@ -21,6 +21,7 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A search whose span starts past 0, in a pattern with a lookbehind whose lane dies before that start (its body anchored at the haystack's start, as `(?<!^)` or `(?<!^a)`), read the byte before its start as the haystack's start on the lazy DFA, so `\b` and `\B` there and at every position after it could be decided wrong: `(?<!^)\b` found nothing in "aa" from 1, where the match is the empty one at 2. The lanes stepped to the start now take the context of the byte before it, as a search from 0 does. Found by the hardened fuzz run (release run 44120371024), its case shrunk into a test with the class around it, nested lanes included.
 - The work translation and compilation are charged no longer depends on the allocator they run in: a list's growth is charged what it adds whether the allocator grows it in place or the list moves, where a move was charged what it added and its whole new length besides. Whether an arena has room in place depends on what it holds and on the machine's page size, so a pattern's charge differed by machine (a class naming one property many times was charged more on aarch64 Linux than its test allows).
 
 ### Added
