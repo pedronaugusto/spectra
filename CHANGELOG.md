@@ -9,6 +9,7 @@ follow [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Pins aegis f52eabe, still 0.2.4, and on it ladar ee89780 and xenoglyph ab4d381: the one aegis the family builds on. Development on preflight's ci-standard f991816 and shakedown 327bc61. The release tier's test jobs, the hardened and ThreadSanitizer runs among them, take 40 minutes: the ThreadSanitizer build and its suite passed the default 20.
+- Development on preflight's ci-standard 9c18016 and shakedown b99b768.
 - In the ECMAScript dialect, `findAll` (and so `replace`) iterates as a global `exec` does: an empty match right after
   a match is reported, so a caller may see one more empty match than before; after an empty match the search moves on
   one character. The Rust dialect keeps regex's rule.
