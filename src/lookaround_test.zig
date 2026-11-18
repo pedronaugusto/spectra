@@ -43,7 +43,7 @@ test "lookahead and lookbehind, positive and negative, nested, through every sea
         var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = ecma });
         defer re.deinit();
         var c = try re.cache(gpa);
-        defer c.deinit(gpa);
+        defer c.deinit();
         try testing.expectEqual(case.want, try re.find(&c, .of(case.haystack)));
         try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, c.last);
         try testing.expectEqual(case.want != null, try re.isMatch(&c, case.haystack));
@@ -53,7 +53,7 @@ test "lookahead and lookbehind, positive and negative, nested, through every sea
     var re = try Regex.compile(gpa, .init("(?<=,)\\w+"), .{ .syntax = ecma });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var it = re.findAll(&c, "a,bc,,d");
     try testing.expectEqual(span(2, 4), try it.next());
     try testing.expectEqual(span(6, 7), try it.next());
@@ -65,7 +65,7 @@ test "zod's email pattern: every lookahead streams, so is-match stores nothing" 
     var re = try Regex.compile(gpa, .init(zod), .{ .syntax = .{ .dialect = .ecmascript } });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     try testing.expectEqual(null, re.longestHaystack(.is_match));
     try testing.expect(try re.isMatch(&c, "ann.lee@example.com"));
     try testing.expect(!try re.isMatch(&c, ".ann@example.com"));
@@ -87,7 +87,7 @@ test "a haystack whose rows pass Limits.oracle is refused by name, before a byte
     var ahead = try Regex.compile(gpa, .init("a(?=b)"), .{ .syntax = ecma, .limits = tiny });
     defer ahead.deinit();
     var ac = try ahead.cache(gpa);
-    defer ac.deinit(gpa);
+    defer ac.deinit();
     try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), ahead.longestHaystack(.find));
     try testing.expectEqual(null, try ahead.find(&ac, .of(&fits)));
     try testing.expectError(error.HaystackTooLong, ahead.find(&ac, .of(&long)));
@@ -100,7 +100,7 @@ test "a haystack whose rows pass Limits.oracle is refused by name, before a byte
     var behind = try Regex.compile(gpa, .init("(?<=a)b"), .{ .syntax = ecma, .limits = tiny });
     defer behind.deinit();
     var bc = try behind.cache(gpa);
-    defer bc.deinit(gpa);
+    defer bc.deinit();
     try testing.expectEqual(null, behind.longestHaystack(.find));
     try testing.expectEqual(null, behind.longestHaystack(.is_match));
     try testing.expectEqual(@as(?usize, @bitSizeOf(usize) - 1), behind.longestHaystack(.find_all));
@@ -118,7 +118,7 @@ fn expectGroups(pattern: []const u8, haystack: []const u8, want: []const ?Regex.
     var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     const groups = try gpa.alloc(?Regex.Span, re.captureCount());
     defer gpa.free(groups);
     try testing.expect(try re.captures(&c, .of(haystack), groups));
@@ -139,7 +139,7 @@ test "a positive lookaround's groups are its first success's, read its way; a ne
     var re = try Regex.compile(gpa, .init("(?!(a))(\\w)"), .{ .syntax = ecma });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var groups: [3]?Regex.Span = undefined;
     try testing.expect(try re.captures(&c, .of("ab"), &groups));
     try testing.expectEqual(span(1, 2), groups[0]);
@@ -158,14 +158,14 @@ test "the lazy DFA reads up to four stored rows as columns, and past that the Pi
     var five = try Regex.compile(gpa, .init("(?=a)(?=\\w)(?=[a-z])(?!b)(?!c)a"), .{ .syntax = ecma });
     defer five.deinit();
     var fc = try five.cache(gpa);
-    defer fc.deinit(gpa);
+    defer fc.deinit();
     try testing.expectEqual(span(1, 2), try five.find(&fc, .of("ba")));
     try testing.expectEqual(Regex.Cache.Path.pikevm_columns, fc.last);
     // Four: the lazy DFA.
     var four = try Regex.compile(gpa, .init("(?=a)(?=\\w)(?=[a-z])(?!b)a"), .{ .syntax = ecma });
     defer four.deinit();
     var gc = try four.cache(gpa);
-    defer gc.deinit(gpa);
+    defer gc.deinit();
     try testing.expectEqual(span(1, 2), try four.find(&gc, .of("ba")));
     try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa, gc.last);
 }
@@ -174,7 +174,7 @@ test "a search starting past the haystack's start runs the streamed lanes alone 
     var re = try Regex.compile(gpa, .init("(?<=a.*)b"), .{ .syntax = ecma });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     // The a lies before the span: the lanes read it.
     const input: Regex.Input = .{ .haystack = "axxb", .span = .{ .start = 2, .end = 4 } };
     try testing.expectEqual(span(3, 4), try re.find(&c, input));
@@ -195,11 +195,11 @@ test "where the lazy DFA's store keeps clearing, it gives up and the PikeVM find
     var small = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .literal("8KiB") } });
     defer small.deinit();
     var sc = try small.cache(gpa);
-    defer sc.deinit(gpa);
+    defer sc.deinit();
     var alone = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
     defer alone.deinit();
     var ac = try alone.cache(gpa);
-    defer ac.deinit(gpa);
+    defer ac.deinit();
     try testing.expectEqual(try alone.find(&ac, .of(&hay)), try small.find(&sc, .of(&hay)));
     try testing.expectEqual(Regex.Cache.Path.lookaround_lazy_dfa_fell_back, sc.last);
     try testing.expectEqual(Regex.Cache.Path.lookaround_pikevm, ac.last);
@@ -269,7 +269,7 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
     };
     defer re.deinit();
     var c = try re.cache(case.gpa);
-    defer c.deinit(case.gpa);
+    defer c.deinit();
     var hay: std.ArrayList(u8) = .empty;
     for (0..shakedown.gen.intRange(s, usize, 0, if (tight) 40 else 8)) |_| try hay.append(a, "ab \n"[shakedown.gen.intRange(s, usize, 0, 3)]);
     const want = spec.exec(a, &hir, hay.items, 50_000) catch |err| switch (err) {
@@ -285,7 +285,7 @@ fn anySearch(_: void, case: *shakedown.Case) !void {
         var alone = try Regex.compile(case.gpa, .init(text.items), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
         defer alone.deinit();
         var ac = try alone.cache(case.gpa);
-        defer ac.deinit(case.gpa);
+        defer ac.deinit();
         try spanAgrees(&re, &c, &alone, &ac, hay.items, shakedown.gen.intRange(s, usize, 1, hay.items.len));
     }
     // Find streams the main expression's lookbehinds beside the PikeVM.
@@ -344,7 +344,7 @@ test "a span search past where a lookbehind's lane died reads the byte before it
         var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = ecma });
         defer re.deinit();
         var c = try re.cache(gpa);
-        defer c.deinit(gpa);
+        defer c.deinit();
         const input: Regex.Input = .{ .haystack = case.haystack, .span = .{ .start = case.start, .end = case.end } };
         try testing.expectEqual(case.want, try re.find(&c, input));
         try testing.expectEqual(.lookaround_lazy_dfa, c.last);
@@ -362,11 +362,11 @@ test "a span search past where a lookbehind's lane died reads the byte before it
         var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma });
         defer re.deinit();
         var c = try re.cache(gpa);
-        defer c.deinit(gpa);
+        defer c.deinit();
         var alone = try Regex.compile(gpa, .init(pattern), .{ .syntax = ecma, .limits = .{ .lazy_dfa = .fromRaw(0) } });
         defer alone.deinit();
         var ac = try alone.cache(gpa);
-        defer ac.deinit(gpa);
+        defer ac.deinit();
         for (haystacks) |haystack| for (1..haystack.len + 1) |start| for (start..haystack.len + 1) |end| {
             const input: Regex.Input = .{ .haystack = haystack, .span = .{ .start = start, .end = end } };
             errdefer std.debug.print("/{s}/ on {any} [{d}, {d})\n", .{ pattern, haystack, start, end });

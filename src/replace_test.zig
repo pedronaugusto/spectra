@@ -13,7 +13,7 @@ fn replaced(pattern: []const u8, syntax: Syntax, haystack: []const u8, with: Reg
     var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = syntax });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     const groups = try gpa.alloc(?Regex.Span, re.captureCount());
     defer gpa.free(groups);
     var out: std.Io.Writer.Allocating = .init(gpa);
@@ -90,7 +90,7 @@ test "the literal and call forms, and the limit: null all, 0 none, n the first n
     var re = try Regex.compile(gpa, .init("a"), .{});
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var groups: [1]?Regex.Span = undefined;
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -101,7 +101,7 @@ fn pieces(pattern: []const u8, syntax: Syntax, haystack: []const u8, limit: ?usi
     var re = try Regex.compile(gpa, .init(pattern), .{ .syntax = syntax });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     const groups = try gpa.alloc(?Regex.Span, re.captureCount());
     defer gpa.free(groups);
     var list: std.ArrayList(?[]const u8) = .empty;

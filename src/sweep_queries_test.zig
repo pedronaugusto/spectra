@@ -97,12 +97,12 @@ test "sweep's five set queries are a few calls each on spectra's sets and steppi
     var set = try Set.compile(gpa, &sources, .{});
     defer set.deinit();
     var cache = try set.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var out = try set.patterns(gpa);
-    defer out.deinit(gpa);
+    defer out.deinit();
     const auto = set.automaton().?;
     var walk = try auto.cache(gpa);
-    defer walk.deinit(gpa);
+    defer walk.deinit();
     const q: Queries = .{ .set = &set, .cache = &cache, .out = &out, .auto = auto, .walk = &walk };
 
     // any, first, last, all.
@@ -127,12 +127,12 @@ test "sweep's five set queries are a few calls each on spectra's sets and steppi
     var narrow = try Set.compile(gpa, &narrow_sources, .{});
     defer narrow.deinit();
     var narrow_cache = try narrow.cache(gpa);
-    defer narrow_cache.deinit(gpa);
+    defer narrow_cache.deinit();
     var narrow_out = try narrow.patterns(gpa);
-    defer narrow_out.deinit(gpa);
+    defer narrow_out.deinit();
     const narrow_auto = narrow.automaton().?;
     var narrow_walk = try narrow_auto.cache(gpa);
-    defer narrow_walk.deinit(gpa);
+    defer narrow_walk.deinit();
     const n: Queries = .{ .set = &narrow, .cache = &narrow_cache, .out = &narrow_out, .auto = narrow_auto, .walk = &narrow_walk };
     try testing.expect(n.leadsTo("") and n.leadsTo("src") and n.leadsTo("src/deep/er") and n.leadsTo("docs") and n.leadsTo("docs/guide"));
     try testing.expect(!n.leadsTo("lib") and !n.leadsTo("docs/guide/deeper") and !n.leadsTo("sr"));
@@ -157,7 +157,7 @@ test "sweep's five set queries are a few calls each on spectra's sets and steppi
         rc.* = try re.cache(gpa);
     }
     defer for (&alone, &caches) |*re, *rc| {
-        rc.deinit(gpa);
+        rc.deinit();
         re.deinit();
     };
     for (subjects) |subject| {

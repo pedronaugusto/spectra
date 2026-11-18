@@ -54,7 +54,7 @@ const Held = struct {
 
     fn deinit(h: *Held) void {
         testing.allocator.free(h.groups);
-        h.cache.deinit(testing.allocator);
+        h.cache.deinit();
         h.re.deinit();
     }
 };
@@ -69,7 +69,7 @@ fn hold(held: *?Held, pattern: []const u8, flags: []const u8) !*Held {
     var re = try Regex.compile(testing.allocator, .init(pattern), .{ .syntax = syntaxOf(flags) });
     errdefer re.deinit();
     var cache = try re.cache(testing.allocator);
-    errdefer cache.deinit(testing.allocator);
+    errdefer cache.deinit();
     held.* = .{ .pattern = pattern, .flags = flags, .re = re, .cache = cache, .groups = try testing.allocator.alloc(?Regex.Span, re.captureCount()) };
     return &held.*.?;
 }

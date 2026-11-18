@@ -336,7 +336,7 @@ fn run(case: Case, tally: *Tally) !void {
     var r = try compiled;
     defer r.deinit();
     var c = try r.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     const groups = try gpa.alloc(?Regex.Span, r.captureCount());
     defer gpa.free(groups);
     const h = case.haystack;

@@ -118,17 +118,17 @@ test "V8's verdicts, through the ECMAScript dialect" {
     // Cases of one pattern and flags come together: each is compiled once.
     var held: ?struct { case: Case, re: Regex, cache: Regex.Cache, alone: Regex, alone_cache: Regex.Cache, hir: Hir } = null;
     defer if (held) |*h| {
-        h.cache.deinit(testing.allocator);
+        h.cache.deinit();
         h.re.deinit();
-        h.alone_cache.deinit(testing.allocator);
+        h.alone_cache.deinit();
         h.alone.deinit();
     };
     for (file.cases) |case| {
         tally.cases += 1;
         if (held) |*h| if (!std.mem.eql(u8, h.case.pattern, case.pattern) or !std.mem.eql(u8, h.case.flags, case.flags)) {
-            h.cache.deinit(testing.allocator);
+            h.cache.deinit();
             h.re.deinit();
-            h.alone_cache.deinit(testing.allocator);
+            h.alone_cache.deinit();
             h.alone.deinit();
             held = null;
         };
@@ -155,7 +155,7 @@ test "V8's verdicts, through the ECMAScript dialect" {
             ast.* = try parse.parse(a, .init(case.pattern), syntaxOf(case.flags), .{}, null);
             const hir = try translate.translate(a, ast, syntaxOf(case.flags), .{}, null);
             var c = try re.cache(testing.allocator);
-            errdefer c.deinit(testing.allocator);
+            errdefer c.deinit();
             held = .{ .case = case, .re = re, .cache = c, .alone = alone, .alone_cache = try alone.cache(testing.allocator), .hir = hir };
         }
         const re = &held.?.re;
@@ -295,7 +295,7 @@ fn anyOracle(_: void, case: *shakedown.Case) !void {
     };
     defer re.deinit();
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     const ast = try a.create(@import("syntax/Ast.zig"));
     ast.* = try parse.parse(a, .init(pattern), syntaxOf(flags), .{}, null);
     const hir = try translate.translate(a, ast, syntaxOf(flags), .{}, null);

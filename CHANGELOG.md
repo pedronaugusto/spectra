@@ -8,6 +8,8 @@ follow [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- `Regex.Cache.deinit`, `Set.Cache.deinit`, `Set.Patterns.deinit` and `Automaton.Cache.deinit` take no allocator: each
+  keeps the one that made it (`Regex.cache`, `Set.cache`, `Set.patterns`, `Automaton.cache`).
 - Pins aegis f52eabe, still 0.2.4, and on it ladar ee89780 and xenoglyph ab4d381: the one aegis the family builds on. Development on preflight's ci-standard f991816 and shakedown 327bc61. The release tier's test jobs, the hardened and ThreadSanitizer runs among them, take 40 minutes: the ThreadSanitizer build and its suite passed the default 20.
 - Development on preflight's ci-standard 9c18016 and shakedown b99b768.
 - The release tier's "Teddy on AVX2" job (`zig build teddy-avx2 -Dteddy-avx2=true`, Linux, under preflight's runner): the Teddy test alone, ReleaseFast, its line naming the kernel this CPU runs in the job's log; it fails by name unless the AVX2 kernel ran (`CpuHasNoAvx2`, `Avx2KernelNotBuilt`), so it never passes on SSSE3.

@@ -22,9 +22,9 @@ test "a set says which patterns match, whether any does, and the leftmost-first 
     defer set.deinit();
     try testing.expectEqual(4, set.len());
     var cache = try set.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var out = try set.patterns(gpa);
-    defer out.deinit(gpa);
+    defer out.deinit();
 
     try testing.expect(try set.matches(&cache, .of("xbaac"), &out));
     try testing.expectEqual(3, out.count());
@@ -51,7 +51,7 @@ test "a set says which patterns match, whether any does, and the leftmost-first 
     var pair = try Set.compile(gpa, &both, .{});
     defer pair.deinit();
     var pair_cache = try pair.cache(gpa);
-    defer pair_cache.deinit(gpa);
+    defer pair_cache.deinit();
     const ab = (try pair.first(&pair_cache, .of("ab"))).?;
     try testing.expectEqual(0, pair.pattern(ab).raw());
     try testing.expectEqual(Set.Span{ .start = 0, .end = 2 }, ab.span);
@@ -62,9 +62,9 @@ test "a whole search counts only a match that covers the span" {
     var set = try Set.compile(gpa, &patterns, .{});
     defer set.deinit();
     var cache = try set.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var out = try set.patterns(gpa);
-    defer out.deinit(gpa);
+    defer out.deinit();
     const whole: Set.Input = .{ .haystack = "ab", .span = .{ .start = 0, .end = 2 }, .whole = true };
     try testing.expect(try set.matches(&cache, whole, &out));
     // "a|ab" covers "ab" by its second branch, though leftmost-first prefers the first.
@@ -77,7 +77,7 @@ test "a whole search counts only a match that covers the span" {
     var re = try Regex.compile(gpa, .init("a|ab"), .{});
     defer re.deinit();
     var rc = try re.cache(gpa);
-    defer rc.deinit(gpa);
+    defer rc.deinit();
     try testing.expectEqual(Regex.Span{ .start = 0, .end = 2 }, (try re.find(&rc, whole)).?);
     try testing.expectEqual(Regex.Cache.Path.whole, rc.last);
     try testing.expectEqual(null, try re.find(&rc, .{ .haystack = "abc", .span = .{ .start = 0, .end = 3 }, .whole = true }));
@@ -134,9 +134,9 @@ fn sameOnEveryPath(a: std.mem.Allocator, patterns: []const @import("aegis").inpu
         };
         defer set.deinit();
         var cache = try set.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         var out = try set.patterns(gpa);
-        defer out.deinit(gpa);
+        defer out.deinit();
         _ = try set.matches(&cache, .of(haystack), &out);
         countPath(cache.last);
         try testing.expect(out.bits.eql(want.bits));
@@ -184,11 +184,11 @@ fn anySet(_: void, case: *shakedown.Case) !void {
     };
     defer set.deinit();
     var cache = try set.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     var out = try set.patterns(case.gpa);
-    defer out.deinit(case.gpa);
+    defer out.deinit();
     var whole_out = try set.patterns(case.gpa);
-    defer whole_out.deinit(case.gpa);
+    defer whole_out.deinit();
     const whole: Set.Input = .{ .haystack = haystack, .span = .{ .start = 0, .end = haystack.len }, .whole = true };
     const any = try set.matches(&cache, .of(haystack), &out);
     countPath(cache.last);
@@ -209,7 +209,7 @@ fn anySet(_: void, case: *shakedown.Case) !void {
         var re = try Regex.compile(case.gpa, .init(text), .{ .syntax = syntax });
         defer re.deinit();
         var rc = try re.cache(case.gpa);
-        defer rc.deinit(case.gpa);
+        defer rc.deinit();
         const pattern: Set.Pattern = @fromBackingInt(@as(u32, @intCast(i)));
         try testing.expectEqual(try re.isMatch(&rc, haystack), out.contains(pattern));
         const covers = (try re.find(&rc, whole)) != null;
@@ -231,7 +231,7 @@ fn anySet(_: void, case: *shakedown.Case) !void {
     var re = try Regex.compile(case.gpa, .init(alt.items), .{ .syntax = syntax });
     defer re.deinit();
     var rc = try re.cache(case.gpa);
-    defer rc.deinit(case.gpa);
+    defer rc.deinit();
     const groups = try a.alloc(?Regex.Span, re.captureCount());
     const found = try set.first(&cache, .of(haystack));
     if (!try re.captures(&rc, .of(haystack), groups)) {

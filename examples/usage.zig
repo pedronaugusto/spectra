@@ -8,7 +8,7 @@ pub fn main(init: std.process.Init) !void {
     var re = try spectra.Regex.compile(gpa, .init("(\\w+)@(\\w+)\\.com"), .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     const haystack = "write to ann@example.com or bob@test.com";
     std.debug.assert(try re.isMatch(&cache, haystack));
     const m = (try re.find(&cache, .of(haystack))).?;
@@ -34,7 +34,7 @@ fn dialects(gpa: std.mem.Allocator) !void {
     var re = try spectra.Regex.compile(gpa, .init("(|a)+"), .{ .syntax = .{ .dialect = .ecmascript, .unicode = true } });
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     const m = (try re.find(&cache, .of("a"))).?;
     std.debug.assert(m.start == 0);
     std.debug.assert(m.end == 1);

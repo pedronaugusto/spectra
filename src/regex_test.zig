@@ -26,7 +26,7 @@ test "is-match, find, captures and names" {
     var re = try compiled("(?<year>\\d{4})-(\\d{2})(x)?", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expect(try re.isMatch(&cache, "on 2026-11 then"));
     try testing.expect(!(try re.isMatch(&cache, "on 26-11")));
     try testing.expectEqual(@as(?Regex.Span, .{ .start = 3, .end = 10 }), (try re.find(&cache, .of("on 2026-11 then"))));
@@ -45,14 +45,14 @@ test "a span of the haystack is searched, its assertions seeing the whole haysta
     var re = try compiled("^a|b$", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     // `^` holds at the haystack's start only, not the span's.
     try testing.expectEqual(@as(?Regex.Span, null), (try re.find(&cache, .{ .haystack = "xab", .span = .{ .start = 1, .end = 2 } })));
     try testing.expectEqual(@as(?Regex.Span, .{ .start = 2, .end = 3 }), (try re.find(&cache, .{ .haystack = "xab", .span = .{ .start = 1, .end = 3 } })));
     var anchored = try compiled("b", .{});
     defer anchored.deinit();
     var c2 = try anchored.cache(gpa);
-    defer c2.deinit(gpa);
+    defer c2.deinit();
     try testing.expectEqual(@as(?Regex.Span, null), (try anchored.find(&c2, .{ .haystack = "ab", .span = .{ .start = 0, .end = 2 }, .anchored = true })));
     try testing.expectEqual(@as(?Regex.Span, .{ .start = 1, .end = 2 }), (try anchored.find(&c2, .{ .haystack = "ab", .span = .{ .start = 1, .end = 2 }, .anchored = true })));
 }
@@ -61,7 +61,7 @@ fn expectAll(pattern: []const u8, syntax: Syntax, haystack: []const u8, want: []
     var re = try compiled(pattern, syntax);
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var it = re.findAll(&cache, haystack);
     var got: std.ArrayList([2]usize) = .empty;
     defer got.deinit(gpa);
@@ -88,7 +88,7 @@ fn expectGroups(pattern: []const u8, syntax: Syntax, haystack: []const u8, want:
     var re = try compiled(pattern, syntax);
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     const got = try gpa.alloc(?Regex.Span, re.captureCount());
     defer gpa.free(got);
     try testing.expect(try re.captures(&cache, .of(haystack), got));
@@ -164,7 +164,7 @@ fn anyAgreement(_: void, case: *shakedown.Case) !void {
     };
     defer re.deinit();
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     const h = haystack.items;
     var lo = shakedown.gen.intRange(s, usize, 0, h.len);
     var hi = shakedown.gen.intRange(s, usize, 0, h.len);
@@ -275,7 +275,7 @@ fn anyLazy(_: void, case: *shakedown.Case) !void {
     defer re.deinit();
     const d = &(re.dfa orelse return);
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     const h = haystack.items;
     // One cache over many searches: its states, clears and give-up carry from one to the next.
     for (0..8) |_| {
@@ -341,14 +341,14 @@ test "the lazy DFA runs a position's closure whole, as the PikeVM does: an alter
         var re = try compiled(case.pattern, syntax);
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         const want = pikevm.search(&re.nfa, &cache.pike, .of(case.haystack), &.{});
         try testing.expectEqual(want, try lazy.search(&re.nfa, &re.dfa.?, &cache.lazy.?, .of(case.haystack)));
     };
     var re = try compiled("(?:\\b|a)*", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = 0, .end = 0 }, (try re.find(&cache, .of("a"))).?);
     try testing.expectEqual(.lazy_dfa, cache.last);
 }
@@ -361,7 +361,7 @@ fn visited(pattern: []const u8, syntax: Syntax, haystack: []const u8) !struct { 
     var re = try compiled(pattern, syntax);
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     _ = (try re.find(&cache, .of(haystack)));
     return .{ .visited = cache.pike.visited + cache.lazy.?.visited + cache.reverse.?.visited + cache.back.?.explored, .threads = pikevm.sizes(&re.nfa).threads };
 }
@@ -408,7 +408,7 @@ test "a cache holds what Limits.cache bounds: counted once, refused at compile p
     var counting: std.testing.FailingAllocator = .init(testing.allocator, .{});
     var cache = try re.cache(counting.allocator());
     try testing.expectEqual(want, counting.allocated_bytes);
-    cache.deinit(counting.allocator());
+    cache.deinit();
 
     // At the figure it compiles; a byte under it is refused by name.
     const at: Limits = .{ .cache = .fromRaw(want) };
@@ -447,7 +447,7 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     defer alone.deinit();
     try testing.expect(re.engines().lazy_dfa and !alone.engines().lazy_dfa);
     var alone_cache = try alone.cache(gpa);
-    defer alone_cache.deinit(gpa);
+    defer alone_cache.deinit();
     const big = try gpa.alloc(u8, 64 * 1024);
     defer gpa.free(big);
     var prng: std.Random.DefaultPrng = .init(0x9a7e);
@@ -456,7 +456,7 @@ test "a lazy DFA that clears too often gives up, the PikeVM searches the span fr
     for ([_]usize{ 16 * 1024, big.len }, 0..) |n, i| {
         // A cache of its own: one that gave up already gives up at its next clear.
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         const got = (try re.find(&cache, .of(big[0..n])));
         try testing.expectEqual(.lazy_dfa_fell_back, cache.last);
         try testing.expectEqual((try alone.find(&alone_cache, .of(big[0..n]))), got);
@@ -486,7 +486,7 @@ test "a reverse lazy DFA that gives up leaves the start to the PikeVM, over the 
     var work: [2]struct { reverse: usize, pike: usize } = undefined;
     for ([_]usize{ 16 * 1024, big.len }, 0..) |n, i| {
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         try testing.expectEqual(Regex.Span{ .start = 0, .end = n }, (try re.find(&cache, .of(big[0..n]))).?);
         try testing.expectEqual(.lazy_dfa, cache.last);
         try testing.expectEqual(.reverse_dfa_fell_back, cache.last_start);
@@ -517,7 +517,7 @@ test "the reverse lazy DFA finds where the leftmost-first match starts, with eac
         var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = case.syntax, .prefilter = false });
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
         try testing.expectEqual(case.want, (try re.find(&cache, .of(case.haystack))).?);
         try testing.expectEqual(.reverse_dfa, cache.last_start);
@@ -534,7 +534,7 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
         var re = try Regex.compile(gpa, .init(case.pattern), .{ .syntax = case.syntax, .prefilter = false });
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         try testing.expectEqual(case.want[0], (try re.find(&cache, .of(case.ascii))).?);
         try testing.expectEqual(.lazy_dfa, cache.last);
         try testing.expectEqual(case.want[1], (try re.find(&cache, .of(case.wide))).?);
@@ -544,7 +544,7 @@ test "a look that needs more than a byte quits the lazy DFA on a byte past 0x7f,
     var re = try compiled("(?-u:\\b)b", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = 3, .end = 4 }, (try re.find(&cache, .of("\u{e9} b"))).?);
     try testing.expectEqual(.lazy_dfa, cache.last);
 }
@@ -554,7 +554,7 @@ test "a store too small for the fewest states leaves the pattern no lazy DFA, an
     defer re.deinit();
     try testing.expectEqual(Regex.Engines{ .lazy_dfa = false, .reverse_dfa = false, .backtrack = true, .onepass = true, .prefilter = false }, re.engines());
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = 1, .end = 4 }, (try re.find(&cache, .of("xaab"))).?);
     try testing.expectEqual(.pikevm, cache.last);
     var roomy = try Regex.compile(gpa, .init("a+b"), .{});
@@ -571,7 +571,7 @@ fn iterationWork(pattern: []const u8, haystack: []const u8) !Iteration {
     var re = try compiled(pattern, .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var it = re.findAll(&cache, haystack);
     var total: Iteration = .{ .work = 0, .matches = 0 };
     while (true) {
@@ -634,7 +634,7 @@ test "a pattern whose every match ends at the haystack's end is read back from t
     var work: [2]usize = undefined;
     for ([_]usize{ 1000, 4000 }, 0..) |n, i| {
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "ab ", n), "end" });
         try testing.expectEqual(Regex.Span{ .start = h.len - 3, .end = h.len }, (try re.find(&cache, .of(h))).?);
         try testing.expectEqual(.reverse_anchored, cache.last);
@@ -650,13 +650,13 @@ test "a pattern whose every match ends at the haystack's end is read back from t
     }
     try testing.expectEqual(work[0], work[1]);
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expect((try re.isMatch(&cache, "x end")) and !(try re.isMatch(&cache, "end ")));
     // A quit reading back goes on as the core strategy, which says how it went.
     var wide = try compiled("\\Bfoo\\z", .{});
     defer wide.deinit();
     var wide_cache = try wide.cache(gpa);
-    defer wide_cache.deinit(gpa);
+    defer wide_cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = 2, .end = 5 }, (try wide.find(&wide_cache, .of("\u{e9}foo"))).?);
     try testing.expectEqual(.lazy_dfa_fell_back, wide_cache.last);
 }
@@ -670,7 +670,7 @@ test "captures are the backtracker's over the match alone where the lazy DFAs fo
     var work: [2]usize = undefined;
     for ([_]usize{ 1000, 4000 }, 0..) |n, i| {
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         const h = try std.mem.concat(arena.allocator(), u8, &.{ try repeatText(arena.allocator(), "x", n), "abcd" });
         var groups: [3]?Regex.Span = undefined;
         try testing.expect(try re.captures(&cache, .of(h), &groups));
@@ -697,7 +697,7 @@ test "the bounded backtracker explores each state and position once, and leaves 
         var re = try compiled(case.pattern, case.syntax);
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         const fill = case.pattern[1];
         var h: [200]u8 = undefined;
         @memset(&h, fill);
@@ -709,7 +709,7 @@ test "the bounded backtracker explores each state and position once, and leaves 
     var re = try Regex.compile(gpa, .init("(a|ab)+"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     const longest = re.backtracker.?.longest().?;
     var a: std.heap.ArenaAllocator = .init(gpa);
     defer a.deinit();
@@ -725,7 +725,7 @@ test "the bounded backtracker explores each state and position once, and leaves 
     var deep = try Regex.compile(gpa, .init("(a|ab)*"), .{ .limits = .{ .backtrack = .literal("4KiB") } });
     defer deep.deinit();
     var deep_cache = try deep.cache(gpa);
-    defer deep_cache.deinit(gpa);
+    defer deep_cache.deinit();
     const run = try repeatText(a.allocator(), "a", @min(deep.backtracker.?.longest().?, 1000));
     try testing.expect(try deep.captures(&deep_cache, .of(run), &groups));
     try testing.expectEqual(.backtrack_fell_back, deep_cache.last_slots);
@@ -765,7 +765,7 @@ test "a one-pass pattern's captures follow one path; a pattern where a byte lead
     var re = try compiled("(\\w+)-(\\d+)", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     var groups: [3]?Regex.Span = undefined;
     try testing.expect(try re.captures(&cache, .of("id: abc-123!"), &groups));
     try testing.expectEqual(.onepass, cache.last_slots);
@@ -840,14 +840,14 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
     defer re.deinit();
     try testing.expect(re.engines().prefilter);
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = h.len - 8, .end = h.len }, (try re.find(&cache, .of(h))).?);
     try testing.expectEqual(.lazy_dfa, cache.last);
     try testing.expect(cache.lazy.?.candidates >= 1 and cache.lazy.?.skipped >= h.len - 8 - 64);
     var off = try Regex.compile(gpa, .init("needle\\d+"), .{ .prefilter = false });
     defer off.deinit();
     var off_cache = try off.cache(gpa);
-    defer off_cache.deinit(gpa);
+    defer off_cache.deinit();
     try testing.expectEqual((try re.find(&cache, .of(h))), (try off.find(&off_cache, .of(h))));
     try testing.expect(cache.lazy.?.visited * 10 < off_cache.lazy.?.visited);
     // A literal, and single bytes: the prefilter alone, the leftmost one's.
@@ -860,7 +860,7 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
         var lit = try compiled(case.pattern, .{});
         defer lit.deinit();
         var lit_cache = try lit.cache(gpa);
-        defer lit_cache.deinit(gpa);
+        defer lit_cache.deinit();
         const Strategy = @import("strategy.zig").Strategy;
         try testing.expectEqual(Strategy.literal, lit.strategy);
         try testing.expectEqual(case.want, (try lit.find(&lit_cache, .of(case.haystack))));
@@ -871,7 +871,7 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
     defer many.deinit();
     if (prefilter.teddyKernel() != null) try testing.expect(many.prefilter.? == .teddy) else try testing.expect(many.prefilter.? == .aho);
     var many_cache = try many.cache(gpa);
-    defer many_cache.deinit(gpa);
+    defer many_cache.deinit();
     const fruit = try std.mem.concat(a, u8, &.{ try repeatText(a, "a quiet line of text. ", 500), "cherry7" });
     try testing.expectEqual(Regex.Span{ .start = fruit.len - 7, .end = fruit.len }, (try many.find(&many_cache, .of(fruit))).?);
     try testing.expect(many_cache.lazy.?.skipped >= fruit.len - 7 - 64);
@@ -879,7 +879,7 @@ test "a prefilter skips what cannot start a match, the literal strategy answers 
     var zeros = try compiled("(?-u:\\x00)y", .{});
     defer zeros.deinit();
     var zeros_cache = try zeros.cache(gpa);
-    defer zeros_cache.deinit(gpa);
+    defer zeros_cache.deinit();
     const z = try a.alloc(u8, 4096);
     @memset(z, 0);
     try testing.expectEqual(null, (try zeros.find(&zeros_cache, .of(z))));
@@ -906,7 +906,7 @@ test "the reverse suffix strategy leads only where the suffix's order is the mat
         var re = try compiled(case.pattern, .{});
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
         try testing.expectEqual(case.strategy, re.strategy);
         try testing.expectEqual(case.want, (try re.find(&cache, .of(case.haystack))));
@@ -917,7 +917,7 @@ test "the reverse suffix strategy leads only where the suffix's order is the mat
     var re = try compiled("\\d+XYZ", .{});
     defer re.deinit();
     var cache = try re.cache(gpa);
-    defer cache.deinit(gpa);
+    defer cache.deinit();
     try testing.expectEqual(Regex.Span{ .start = 0, .end = 7 }, (try re.find(&cache, .of("1234XYZ"))).?);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
@@ -948,9 +948,9 @@ fn anySuffixed(_: void, case: *shakedown.Case) !void {
     var alone = try Regex.compile(case.gpa, .init(out.items), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
     defer alone.deinit();
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     var alone_cache = try alone.cache(case.gpa);
-    defer alone_cache.deinit(case.gpa);
+    defer alone_cache.deinit();
     const lo = shakedown.gen.intRange(s, usize, 0, h.items.len);
     const input: Regex.Input = .{ .haystack = h.items, .span = .{ .start = lo, .end = h.items.len } };
     try testing.expectEqual((try alone.find(&alone_cache, input)), (try re.find(&cache, input)));
@@ -983,7 +983,7 @@ test "the reverse inner strategy leads only where the inner literals' order is t
         var re = try compiled(case.pattern, .{});
         defer re.deinit();
         var cache = try re.cache(gpa);
-        defer cache.deinit(gpa);
+        defer cache.deinit();
         errdefer std.debug.print("/{s}/ on {s}\n", .{ case.pattern, case.haystack });
         try testing.expectEqual(case.strategy, re.strategy);
         try testing.expectEqual(case.want, (try re.find(&cache, .of(case.haystack))));
@@ -1013,9 +1013,9 @@ fn anyInner(_: void, case: *shakedown.Case) !void {
     var alone = try Regex.compile(case.gpa, .init(out.items), .{ .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
     defer alone.deinit();
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     var alone_cache = try alone.cache(case.gpa);
-    defer alone_cache.deinit(case.gpa);
+    defer alone_cache.deinit();
     const lo = shakedown.gen.intRange(s, usize, 0, h.items.len);
     const input: Regex.Input = .{ .haystack = h.items, .span = .{ .start = lo, .end = h.items.len } };
     try testing.expectEqual((try alone.find(&alone_cache, input)), (try re.find(&cache, input)));
@@ -1060,9 +1060,9 @@ fn anyBytes(_: void, case: *shakedown.Case) !void {
     var alone = try Regex.compile(case.gpa, .init(pattern), .{ .syntax = syntax, .limits = .{ .lazy_dfa = .fromRaw(0), .backtrack = .fromRaw(0), .onepass = .fromRaw(0) }, .prefilter = false });
     defer alone.deinit();
     var cache = try re.cache(case.gpa);
-    defer cache.deinit(case.gpa);
+    defer cache.deinit();
     var alone_cache = try alone.cache(case.gpa);
-    defer alone_cache.deinit(case.gpa);
+    defer alone_cache.deinit();
     try testing.expectEqual((try alone.find(&alone_cache, .of(haystack))), (try re.find(&cache, .of(haystack))));
     try testing.expectEqual((try alone.isMatch(&alone_cache, haystack)), (try re.isMatch(&cache, haystack)));
     const groups = try a.alloc(?Regex.Span, re.captureCount());
@@ -1114,9 +1114,9 @@ test "Teddy runs on the widest kernel this CPU has, says which, and finds what a
     var plain = try Regex.compile(gpa, .init(pattern), .{ .prefilter = false });
     defer plain.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var pc = try plain.cache(gpa);
-    defer pc.deinit(gpa);
+    defer pc.deinit();
     // A long haystack, the literals spread through it, across many of the kernel's blocks.
     var prng: std.Random.DefaultPrng = .init(0x7edd);
     const random = prng.random();

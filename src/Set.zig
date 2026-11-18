@@ -150,6 +150,8 @@ pub fn pattern(set: *const Set, m: Match) Pattern {
 
 /// What one task's searches of the set need, allocated once: no search allocates.
 pub const Cache = struct {
+    /// Private: the allocator `cache` took, which `deinit` frees with.
+    gpa: Allocator,
     pike: pikevm.Cache,
     all: ?lazy.Cache,
     leftmost: ?lazy.Cache,
@@ -169,7 +171,8 @@ pub const Cache = struct {
         lazy_dfa_fell_back,
     };
 
-    pub fn deinit(c: *Cache, gpa: Allocator) void {
+    pub fn deinit(c: *Cache) void {
+        const gpa = c.gpa;
         c.pike.deinit(gpa);
         if (c.all) |*l| l.deinit(gpa);
         if (c.leftmost) |*l| l.deinit(gpa);
@@ -185,17 +188,19 @@ pub fn cache(set: *const Set, gpa: Allocator) Allocator.Error!Cache {
     errdefer if (all) |*l| l.deinit(gpa);
     var leftmost: ?lazy.Cache = if (set.leftmost) |*d| try .init(gpa, d) else null;
     errdefer if (leftmost) |*l| l.deinit(gpa);
-    return .{ .pike = pike, .all = all, .leftmost = leftmost, .scratch = try .initEmpty(gpa, set.len()), .set = set.id };
+    return .{ .gpa = gpa, .pike = pike, .all = all, .leftmost = leftmost, .scratch = try .initEmpty(gpa, set.len()), .set = set.id };
 }
 
 /// Which patterns matched: a bit per pattern, allocated once by the caller (`Set.patterns`) and
 /// filled by `matches`.
 pub const Patterns = struct {
+    /// Private: the allocator `patterns` took, which `deinit` frees with.
+    gpa: Allocator,
     bits: std.DynamicBitSetUnmanaged,
     set: u64,
 
-    pub fn deinit(p: *Patterns, gpa: Allocator) void {
-        p.bits.deinit(gpa);
+    pub fn deinit(p: *Patterns) void {
+        p.bits.deinit(p.gpa);
         p.* = undefined;
     }
 
@@ -238,7 +243,7 @@ pub const Patterns = struct {
 
 /// A bit per pattern of the set, for `matches` to fill.
 pub fn patterns(set: *const Set, gpa: Allocator) Allocator.Error!Patterns {
-    return .{ .bits = try .initEmpty(gpa, set.len()), .set = set.id };
+    return .{ .gpa = gpa, .bits = try .initEmpty(gpa, set.len()), .set = set.id };
 }
 
 /// Whether some pattern matches in `input`. `error.HaystackTooLong` never occurs: a set holds

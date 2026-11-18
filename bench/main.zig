@@ -107,7 +107,7 @@ fn search(r: Report, gpa: Allocator, text: []const u8) !void {
         var re = try Regex.compile(gpa, .init(case[0]), .{ .syntax = case[1] });
         defer re.deinit();
         var c = try re.cache(gpa);
-        defer c.deinit(gpa);
+        defer c.deinit();
         const t0 = r.now();
         _ = try re.find(&c, .of(text));
         const find_ns = nsBetween(t0, r.now());
@@ -152,9 +152,9 @@ fn sets(r: Report, gpa: Allocator, a: Allocator, text: []const u8, n: usize) !vo
     var set = try Set.compile(gpa, sources, .{});
     defer set.deinit();
     var c = try set.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var out = try set.patterns(gpa);
-    defer out.deinit(gpa);
+    defer out.deinit();
     const t0 = r.now();
     _ = try set.matches(&c, .of(text), &out);
     const name = try a.print("{d}-patterns", .{n});
@@ -166,7 +166,7 @@ fn lookaround(r: Report, gpa: Allocator, a: Allocator, text: []const u8, smoke: 
     var re = try Regex.compile(gpa, .init(zod), .{ .syntax = .{ .dialect = .ecmascript } });
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     const values = [_][]const u8{ "ann@example.com", ".ann@example.com", "ann..lee@example.com", "a.b+c@sub.example.org" };
     const rounds: usize = if (smoke) 10 else 100_000;
     var matched: usize = 0;
@@ -177,7 +177,7 @@ fn lookaround(r: Report, gpa: Allocator, a: Allocator, text: []const u8, smoke: 
     var behind = try Regex.compile(gpa, .init("(?<=Baker )street"), .{ .syntax = .{ .dialect = .ecmascript } });
     defer behind.deinit();
     var bc = try behind.cache(gpa);
-    defer bc.deinit(gpa);
+    defer bc.deinit();
     const t1 = r.now();
     const count = try countAll(&behind, &bc, text);
     _ = a;
@@ -189,7 +189,7 @@ fn replace(r: Report, gpa: Allocator, text: []const u8) !void {
     var re = try Regex.compile(gpa, .init("(\\w+)@(\\w+)\\.com"), .{});
     defer re.deinit();
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var groups: [3]?Regex.Span = undefined;
     var discard: std.Io.Writer.Discarding = .init(&.{});
     const t0 = r.now();
@@ -199,7 +199,7 @@ fn replace(r: Report, gpa: Allocator, text: []const u8) !void {
     var space = try Regex.compile(gpa, .init("\\s+"), .{});
     defer space.deinit();
     var sc = try space.cache(gpa);
-    defer sc.deinit(gpa);
+    defer sc.deinit();
     var none: [1]?Regex.Span = undefined;
     const t1 = r.now();
     var it = space.split(&sc, text, &none, null);

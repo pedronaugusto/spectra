@@ -59,12 +59,14 @@ pub const State = struct {
 
 /// The store states live in, allocated once, for one walker at a time.
 pub const Cache = struct {
+    /// Private: the allocator `cache` took, which `deinit` frees with.
+    gpa: Allocator,
     lazy: lazy.Cache,
     /// The automaton it was made for.
     dfa: *const lazy.Dfa,
 
-    pub fn deinit(c: *Cache, gpa: Allocator) void {
-        c.lazy.deinit(gpa);
+    pub fn deinit(c: *Cache) void {
+        c.lazy.deinit(c.gpa);
         c.* = undefined;
     }
 
@@ -83,7 +85,7 @@ pub fn of(nfa: *const Nfa, dfa: *const lazy.Dfa) ?Automaton {
 }
 
 pub fn cache(a: Automaton, gpa: Allocator) Allocator.Error!Cache {
-    return .{ .lazy = try .init(gpa, a.dfa), .dfa = a.dfa };
+    return .{ .gpa = gpa, .lazy = try .init(gpa, a.dfa), .dfa = a.dfa };
 }
 
 pub fn start(a: Automaton, c: *Cache, at: Start) StepError!State {

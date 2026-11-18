@@ -280,9 +280,9 @@ fn check(pattern: []const u8, syntax: Syntax, text: []const u8, tally: *Tally) !
     defer alone.deinit();
     tally.compiled += 1;
     var c = try re.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var ac = try alone.cache(gpa);
-    defer ac.deinit(gpa);
+    defer ac.deinit();
     const slots = try gpa.alloc(?usize, re.nfa.slots());
     defer gpa.free(slots);
     const groups = try gpa.alloc(?Regex.Span, re.captureCount());

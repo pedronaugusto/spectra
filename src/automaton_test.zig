@@ -22,7 +22,7 @@ test "a walk asks whether the bytes so far match, keeping the longer alternative
     defer re.deinit();
     const a = re.automaton().?;
     var c = try a.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var s = try a.start(&c, .{});
     try testing.expect(!Automaton.isMatch(try a.stepEnd(&c, s)));
     s = try a.step(&c, s, 'a');
@@ -41,7 +41,7 @@ test "a walk asks whether the bytes so far match, keeping the longer alternative
     defer end.deinit();
     const e = end.automaton().?;
     var ec = try e.cache(gpa);
-    defer ec.deinit(gpa);
+    defer ec.deinit();
     var t = try e.start(&ec, .{});
     for ("foo") |b| t = try e.step(&ec, t, b);
     try testing.expect(Automaton.isMatch(try e.stepEnd(&ec, t)));
@@ -59,7 +59,7 @@ test "a set's walk says which patterns match" {
     defer set.deinit();
     const a = set.automaton().?;
     var c = try a.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var s = try a.start(&c, .{});
     s = try a.step(&c, s, 'a');
     s = try a.step(&c, s, 'b');
@@ -89,9 +89,9 @@ fn anyWalk(_: void, case: *shakedown.Case) !void {
     defer re.deinit();
     const auto = re.automaton() orelse return;
     var rc = try re.cache(case.gpa);
-    defer rc.deinit(case.gpa);
+    defer rc.deinit();
     var c = try auto.cache(case.gpa);
-    defer c.deinit(case.gpa);
+    defer c.deinit();
     if (syntax.dialect == .ecmascript) walked.ecma += 1;
     var path: std.ArrayList(u8) = .empty;
     for (0..shakedown.gen.intRange(s, usize, 0, 8)) |_| try path.append(a, "ab "[shakedown.gen.intRange(s, usize, 0, 2)]);
@@ -218,10 +218,10 @@ const Walker = struct {
 fn walkWords(a: std.mem.Allocator, re: *const Regex, store: usize, words: []const []const u8, out: []bool, w_out: *Walker) !void {
     _ = store;
     var rc = try re.cache(gpa);
-    defer rc.deinit(gpa);
+    defer rc.deinit();
     const auto = re.automaton().?;
     var c = try auto.cache(gpa);
-    defer c.deinit(gpa);
+    defer c.deinit();
     var w: Walker = .{ .auto = auto, .cache = &c, .re = re, .rc = &rc };
     try w.begin(a);
     var prev: []const u8 = "";
@@ -275,7 +275,7 @@ test "the recipe for Stale and GaveUp keeps a walker's answers those of an unbou
             try testing.expectEqual(0, big_walk.stales + big_walk.gave_up);
             // And each answer is the whole search's.
             var rc = try big.cache(gpa);
-            defer rc.deinit(gpa);
+            defer rc.deinit();
             for (words.items, want) |word, answer| try testing.expectEqual(try matchesWhole(&big, &rc, word), answer);
             stales += small_walk.stales;
             gave_up += small_walk.gave_up + @intFromBool(small_walk.searching);

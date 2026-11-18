@@ -261,7 +261,7 @@ fn runWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value, p
         return false;
     }
     var cache = try re.cache(testing.allocator);
-    defer cache.deinit(testing.allocator);
+    defer cache.deinit();
     const want = try expected(a, field(t, "matches").?.array);
     var input: Regex.Input = .of(haystack);
     if (field(t, "bounds")) |b| input.span = spanOf(b).?;
@@ -393,7 +393,7 @@ fn runSetWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value
         return false;
     }
     var cache = try set.cache(testing.allocator);
-    defer cache.deinit(testing.allocator);
+    defer cache.deinit();
     var input: Set.Input = .of(haystack);
     if (field(t, "bounds")) |b| input.span = spanOf(b).?;
     input.anchored = flag(t, "anchored", false);
@@ -403,7 +403,7 @@ fn runSetWith(a: std.mem.Allocator, file: []const u8, name: []const u8, t: Value
             var want = try std.DynamicBitSetUnmanaged.initEmpty(a, patterns.len);
             for (matches) |m| want.set(idOf(m));
             var got = try set.patterns(testing.allocator);
-            defer got.deinit(testing.allocator);
+            defer got.deinit();
             _ = try set.matches(&cache, input, &got);
             tally.countSet(cache.last);
             if (!got.bits.eql(want)) {

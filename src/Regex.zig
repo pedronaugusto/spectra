@@ -536,6 +536,8 @@ pub fn deinit(re: *Regex) void {
 
 /// What one task's searches of this pattern need, allocated once.
 pub const Cache = struct {
+    /// Private: the allocator `cache` took, which `deinit` frees with.
+    gpa: Allocator,
     pike: pikevm.Cache,
     lazy: ?lazy.Cache,
     reverse: ?lazy.Cache,
@@ -634,7 +636,8 @@ pub const Cache = struct {
         onepass,
     };
 
-    pub fn deinit(c: *Cache, gpa: Allocator) void {
+    pub fn deinit(c: *Cache) void {
+        const gpa = c.gpa;
         c.pike.deinit(gpa);
         if (c.lazy) |*l| l.deinit(gpa);
         if (c.reverse) |*r| r.deinit(gpa);
@@ -708,6 +711,7 @@ pub fn cache(re: *const Regex, gpa: Allocator) Allocator.Error!Cache {
     }
     const look_match_lazy: ?lazy.Cache = if (re.look) |*l| (if (l.match_dfa) |*sc| (if (sc.dfa) |*d| try lazy.Cache.init(gpa, d) else null) else null) else null;
     return .{
+        .gpa = gpa,
         .pike = pike,
         .lazy = forward,
         .reverse = reverse,
