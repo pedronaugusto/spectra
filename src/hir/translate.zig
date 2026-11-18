@@ -4,7 +4,7 @@
 //! class operators is as long as its pattern, whatever `Limits.nesting` says.
 //!
 //! What ECMA-262 means and spectra cannot run is refused by name, `error.Unsupported`:
-//! backreferences, lookbehind, a lookaround inside a lookaround, a property with no data.
+//! backreferences, a property with no data, half of a code point past U+FFFF named alone.
 //!
 //! Every set of ranges translation makes, the ones on the way to a class among them (the
 //! characters before they are put in order, a complement, a closure), is charged to

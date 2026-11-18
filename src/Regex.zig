@@ -77,7 +77,7 @@ dialect: Syntax.Dialect = .rust,
 /// (`search`: every lookaround the main expression queries stored). `isMatch` runs one scan of
 /// the strings-only main automaton (`match_nfa`) read the way that streams the lookarounds it
 /// queries directly (`match`), so it stores only the ones nested the other way. The lazy DFAs,
-/// the backtracker, the one-pass DFA and the literal strategies do not run such patterns yet.
+/// the backtracker, the one-pass DFA and the literal strategies do not run such patterns.
 pub const Look = struct {
     /// Every row stored: `findAll`'s, whose searches restart along the haystack, and the rebuild
     /// runs'. It owns the row automata; the plans below are views of it.

@@ -33,8 +33,8 @@
 //! where an empty iteration can constrain the string, which backreferences and lookaround
 //! bodies would: a pattern holding one gets no reverse automaton until it is thought again.
 //!
-//! ECMAScript's lookahead runs on the derivative engine, not on this automaton; until that is
-//! built a pattern holding one is refused (`Unsupported`, `unsupported_lookaround`).
+//! ECMAScript's lookaround is a `check` state the oracle answers from its rows; an automaton
+//! built without the oracle refuses a pattern holding one (`Unsupported`, `unsupported_lookaround`).
 const std = @import("std");
 const aegis = @import("aegis");
 const Allocator = std.mem.Allocator;
