@@ -89,9 +89,9 @@ pub fn compile(gpa: Allocator, hir: *const Hir, options: Options, diagnostic: ?*
 pub fn compileCounted(gpa: Allocator, hir: *const Hir, options: Options, diagnostic: ?*Diagnostic, spent: *usize) Error!Nfa {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    const limit = options.limits.nfa.raw();
-    var charged: Charged = .{ .child = scratch.allocator(), .left = limit };
-    defer spent.* = limit - charged.left;
+    const limit = options.limits.nfa;
+    var charged: Charged = .{ .child = scratch.allocator(), .left = limit.raw() };
+    defer spent.* = (limit.sub(.fromRaw(charged.left)) catch aegis.assert.never("the charge takes no more than the limit")).raw();
     // Reversed, only the strings count: Rust's repetitions match the same ones (the file's doc).
     const reverse = options.reverse or options.backward;
     const priority = !options.reverse or options.backward;

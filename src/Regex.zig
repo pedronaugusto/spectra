@@ -250,9 +250,9 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
     errdefer stream_combined.deinit(gpa);
     var search_combined = try lazy.combine(gpa, &nfa, &search, null, .forward);
     errdefer search_combined.deinit(gpa);
-    const lazy_bytes = options.limits.lazy_dfa.raw();
-    const stream_dfa = if (stream_combined.too_many_columns) null else lazy.buildLook(&stream_combined.nfa, lazy_bytes, .forward, .leftmost_first, stream_combined.info());
-    const search_dfa = if (search_combined.too_many_columns) null else lazy.buildLook(&search_combined.nfa, lazy_bytes, .forward, .leftmost_first, search_combined.info());
+    const lazy_bytes = options.limits.lazy_dfa;
+    const stream_dfa = if (stream_combined.too_many_columns) null else lazy.buildLook(&stream_combined.nfa, lazy_bytes.raw(), .forward, .leftmost_first, stream_combined.info());
+    const search_dfa = if (search_combined.too_many_columns) null else lazy.buildLook(&search_combined.nfa, lazy_bytes.raw(), .forward, .leftmost_first, search_combined.info());
     // Each row's scan on a share of the store; `isMatch`'s on a store of its own.
     const row_dfas = try gpa.alloc(?Look.Scanner, search.rows.len);
     @memset(row_dfas, null);
@@ -260,15 +260,15 @@ fn compileLookaround(gpa: Allocator, arena: Allocator, hir: *const Hir, options:
         for (row_dfas) |*r| if (r.*) |*sc| sc.combined.deinit(gpa);
         gpa.free(row_dfas);
     }
-    const share = lazy_bytes / (search.rows.len + 1);
+    const share = lazy_bytes.divTrunc(search.rows.len + 1) catch aegis.assert.never("one more than the rows is no zero");
     for (search.rows, row_dfas, 0..) |r, *out, i| {
         var combined = try lazy.combine(gpa, &r.nfa, &search, @intCast(i), r.scan);
         errdefer combined.deinit(gpa);
-        out.* = .{ .combined = combined, .dfa = scannerDfa(&combined, share, r.scan) };
+        out.* = .{ .combined = combined, .dfa = scannerDfa(&combined, share.raw(), r.scan) };
     }
     var match_combined = try lazy.combine(gpa, &match_nfa, &match, null, scan);
     errdefer match_combined.deinit(gpa);
-    const match_dfa: Look.Scanner = .{ .combined = match_combined, .dfa = scannerDfa(&match_combined, lazy_bytes, scan) };
+    const match_dfa: Look.Scanner = .{ .combined = match_combined, .dfa = scannerDfa(&match_combined, lazy_bytes.raw(), scan) };
     const look: Look = .{
         .search = search,
         .stream = stream,
